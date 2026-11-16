@@ -1,4 +1,4 @@
-# ADR-001: GraphCache is a layer, not a database
+# ADR-001: BAiD is a layer, not a database
 
 ## Context
 
@@ -6,7 +6,7 @@ Works with every backend; no data-of-record risk; small enough to build alone.
 
 ## Decision
 
-GraphCache is a layer, not a database.
+BAiD is a layer, not a database.
 
 ## Consequences
 

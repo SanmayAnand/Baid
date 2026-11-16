@@ -6,7 +6,7 @@ next number; a changed decision gets a new ADR that supersedes the old one.
 
 | ADR | Decision | Status |
 | --- | --- | --- |
-| [001](001-layer-not-db.md) | GraphCache is a layer, not a database | Accepted |
+| [001](001-layer-not-db.md) | BAiD is a layer, not a database | Accepted |
 | [002](002-rust-with-tokio.md) | Rust with tokio | Accepted |
 | [003](003-statistical-predictor-first.md) | Statistical predictor first; no LLM on the request path | Accepted |
 | [004](004-write-through-invalidation.md) | Write-through invalidation with entity versions, TTL as backstop | Accepted |

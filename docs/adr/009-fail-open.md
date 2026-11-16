@@ -2,7 +2,7 @@
 
 ## Context
 
-GraphCache can never make an agent less available than its backend.
+BAiD can never make an agent less available than its backend.
 
 ## Decision
 
