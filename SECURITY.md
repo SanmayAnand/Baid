@@ -10,7 +10,7 @@ you tested. We will acknowledge the report and keep you updated until it is fixe
 
 ## Tenant isolation bugs are security bugs
 
-GraphCache serves many tenants from one cache. Any way for one tenant to read, infer, poison or
+BAiD serves many tenants from one cache. Any way for one tenant to read, infer, poison or
 evict another tenant's data counts as a security bug and must be reported privately. Examples:
 
 - a cache hit that returns another tenant's memory items;
@@ -20,4 +20,4 @@ evict another tenant's data counts as a security bug and must be reported privat
 
 ## Supported versions
 
-GraphCache is pre-alpha. Only the latest `main` gets fixes.
+BAiD is pre-alpha. Only the latest `main` gets fixes.

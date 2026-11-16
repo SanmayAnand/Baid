@@ -11,5 +11,5 @@ bench/raw/
 *.log
 CLAUDE.md
 CONTRIBUTING.md
-.github
-.claude
+.github/
+.claude/

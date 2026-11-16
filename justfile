@@ -1,4 +1,4 @@
-# GraphCache task runner. Run `just` to list recipes.
+# BAiD task runner. Run `just` to list recipes.
 
 set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
 

@@ -1,1 +1,1 @@
-//! Metrics, traces and structured logs for every GraphCache component. Owner: Person B.
+//! Metrics, traces and structured logs for every BAiD component. Owner: Person B.

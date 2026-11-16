@@ -10,7 +10,7 @@ Write-through invalidation with entity versions, TTL as backstop.
 
 ## Consequences
 
-Trade-off accepted: Writes must flow through GraphCache to be instant.
+Trade-off accepted: Writes must flow through BAiD to be instant.
 
 ## Status
 

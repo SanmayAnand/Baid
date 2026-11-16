@@ -7,7 +7,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "graphcache"
+name = "BAiD"
 path = "src/main.rs"
 
 [lints]
