@@ -1,0 +1,19 @@
+# Who reviews what. GitHub requests these reviewers automatically.
+/crates/core/        @SanmayAnand @SoumaCloud
+/crates/cache/       @SanmayAnand
+/crates/session/     @SanmayAnand
+/crates/predict/     @SanmayAnand
+/crates/exec/        @SanmayAnand
+/crates/invalidate/  @SanmayAnand
+/crates/server/      @SanmayAnand
+/crates/memharness/  @SoumaCloud
+/crates/adapters/    @SoumaCloud
+/crates/pack/        @SoumaCloud
+/crates/telemetry/   @SoumaCloud
+/crates/mcp/         @SoumaCloud
+/python/             @SoumaCloud
+/deploy/             @SoumaCloud
+/xtask/              @SanmayAnand @SoumaCloud
+/.claude/            @SanmayAnand @SoumaCloud
+/CLAUDE.md           @SanmayAnand @SoumaCloud
+/.github/            @SanmayAnand @SoumaCloud

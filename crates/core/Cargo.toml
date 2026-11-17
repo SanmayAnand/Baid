@@ -1,0 +1,29 @@
+[package]
+name = "baid-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+# MockBackend and other helpers for tests in downstream crates.
+test-util = []
+
+[dependencies]
+async-trait.workspace = true
+blake3.workspace = true
+serde = { workspace = true, features = ["derive", "rc"] }
+smallvec = { workspace = true, features = ["serde", "union"] }
+thiserror.workspace = true
+time = { workspace = true, features = ["serde", "formatting", "parsing"] }
+unicode-normalization.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+serde_json.workspace = true
+time = { workspace = true, features = ["macros"] }
+toml.workspace = true
+
+[lints]
+workspace = true

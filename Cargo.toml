@@ -1,24 +1,25 @@
 [workspace]
 resolver = "2"
 # Layers (code-architecture.md section 1); a crate depends only on lower layers:
-#   binaries:        gc-server, memharness
-#   orchestration:   gc-exec, gc-mcp
-#   building blocks: gc-cache, gc-session, gc-predict, gc-pack, gc-invalidate,
-#                    gc-adapters, gc-telemetry
-#   foundation:      gc-core (depends on no other gc crate)
+#   binaries:        server, memharness
+#   orchestration:   exec, mcp
+#   building blocks: cache, session, predict, pack, invalidate,
+#                    adapters, telemetry
+#   foundation:      baid-core (depends on no other gc crate)
 members = [
-    "crates/gc-core",
-    "crates/gc-cache",
-    "crates/gc-session",
-    "crates/gc-predict",
-    "crates/gc-pack",
-    "crates/gc-invalidate",
-    "crates/gc-adapters",
-    "crates/gc-telemetry",
-    "crates/gc-exec",
-    "crates/gc-mcp",
-    "crates/gc-server",
+    "crates/core",
+    "crates/cache",
+    "crates/session",
+    "crates/predict",
+    "crates/pack",
+    "crates/invalidate",
+    "crates/adapters",
+    "crates/telemetry",
+    "crates/exec",
+    "crates/mcp",
+    "crates/server",
     "crates/memharness",
+    "xtask",
 ]
 
 [workspace.package]
@@ -31,16 +32,16 @@ publish = false
 
 [workspace.dependencies]
 # Internal crates
-gc-core = { path = "crates/gc-core" }
-gc-cache = { path = "crates/gc-cache" }
-gc-session = { path = "crates/gc-session" }
-gc-predict = { path = "crates/gc-predict" }
-gc-pack = { path = "crates/gc-pack" }
-gc-invalidate = { path = "crates/gc-invalidate" }
-gc-adapters = { path = "crates/gc-adapters" }
-gc-telemetry = { path = "crates/gc-telemetry" }
-gc-exec = { path = "crates/gc-exec" }
-gc-mcp = { path = "crates/gc-mcp" }
+baid-core = { path = "crates/core" }
+cache = { path = "crates/cache" }
+session = { path = "crates/session" }
+predict = { path = "crates/predict" }
+pack = { path = "crates/pack" }
+invalidate = { path = "crates/invalidate" }
+adapters = { path = "crates/adapters" }
+telemetry = { path = "crates/telemetry" }
+exec = { path = "crates/exec" }
+mcp = { path = "crates/mcp" }
 
 # External crates from the dependency table in code-architecture.md section 1.
 # Latest stable releases on crates.io as of 2026-11-14. Crates enable features
@@ -71,12 +72,17 @@ serde_json = "1.0.154"
 smallvec = "1.16.5"
 thiserror = "2.0.21"
 tiktoken-rs = "0.12.1"
+time = "0.3.55"
 tokio = "1.54.1"
 tokio-util = "0.7.20"
 tower-http = "0.7.1"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 unicode-normalization = "0.1.26"
+
+# Test-only
+proptest = "1.12.0"
+toml = "1.2.1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
