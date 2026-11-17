@@ -1,3 +1,10 @@
 [alias]
 # Repository checks: `cargo xtask layers`, `cargo xtask spawns`, `cargo xtask all`.
 xtask = "run --quiet -p xtask --"
+
+[env]
+# A global `CC=gcc` (MinGW) breaks C dependencies (foyer's lz4/zstd, later TLS crypto) on the
+# MSVC target: the objects need MinGW's ___chkstk_ms at link time. An empty target-specific
+# value wins over `CC` and lets cc-rs auto-detect MSVC's cl.exe. Other targets are unaffected.
+CC_x86_64_pc_windows_msvc = ""
+CXX_x86_64_pc_windows_msvc = ""

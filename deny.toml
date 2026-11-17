@@ -5,7 +5,9 @@ all-features = true
 
 [advisories]
 # Defaults: known vulnerabilities and unsound crates fail the check.
-ignore = []
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "paste: archived proc-macro pulled in via foyer; compile-time only, no known vulnerability. Revisit on foyer upgrades." },
+]
 
 [licenses]
 allow = [

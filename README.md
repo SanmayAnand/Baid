@@ -8,9 +8,10 @@ agent's token budget. Agent tasks get faster and cheaper with no change to the d
 BAiD is a layer, not a database. It never holds source-of-truth data: everything it caches can
 be dropped and rebuilt from the backend.
 
-> **Status: pre-alpha.** The foundation crate (`baid-core`) is built and tested. The server
-> and the rest of the engine are in progress; nothing runs end to end yet. See the
-> [build plan](docs/build-plan.md) for what is done and what is next.
+> **Status: pre-alpha.** `recall` and `remember` work end to end over HTTP against the
+> in-process `memory` adapter, with the RAM cache, API-key auth and the staleness guarantees
+> below. Neo4j and S3 adapters, prefetch and MCP are next. See the
+> [build plan](docs/build-plan.md).
 
 ## Why
 
@@ -39,18 +40,23 @@ idle. BAiD uses that idle time:
    prefetch path  after the response: session tracker → predictor → budget governor
                   → batched backend call → cached as low-priority "speculative" entries
 
-   write path     remember → backend write → ack → bump entity versions → evict keys
+   write path     remember → backend write → ack → stamp entities with a write number
 ```
 
 - **One contract per side.** Agents see two calls, `recall` and `remember`. Backends implement
   one adapter trait with capability flags.
 - **Tenant isolation by construction.** The tenant comes only from the API key, and a cache
   key cannot be built without one, so a cross-tenant hit is a type error, not a bug to catch.
-- **Never stale after your own write.** Writes go through BAiD to the backend. After the
-  backend acknowledges, BAiD bumps a version number for every entity the write touched, then
-  evicts the cached results that mention them. A slow read that started before the write
-  carries the old versions and is refused when it tries to fill the cache. Writes that bypass
-  BAiD are bounded by the per-tenant TTL.
+- **Writes are never undone by the cache.** Writes go through BAiD to the backend. After the
+  backend acknowledges, BAiD stamps every entity the write touched with the tenant's next
+  write number. Every cached result remembers the write number from when its load began, and
+  is refused (on put and on every read) if any entity it names or returns was stamped later.
+  So a slow read that started before a write can never serve pre-write data.
+- **A session always sees its own writes.** After a session writes, cached results loaded
+  before that write are misses for that session.
+- **What the TTL bounds.** A write can also *add* a result to someone else's cached search
+  (a new fact that now matches). Other sessions see such additions within the tenant's TTL,
+  the same bound as writes made outside BAiD.
 - **Speculation is bounded.** Prefetch spends a fixed per-tenant budget, gets a deadline equal
   to the session's think time, is cancelled the moment it stops being useful, and is the first
   thing cut under load. Wrong guesses are evicted first.
@@ -98,6 +104,10 @@ Requirements: Rust stable 1.91 or newer (picked up from `rust-toolchain.toml`) a
 just check        # fmt, clippy -D warnings, layer and spawn rules, all tests
 cargo xtask all   # just the repository rules
 just deny         # licences, advisories, bans
+
+# run the server against a config (each tenant's API key comes from its api_key_env)
+cargo run -p server -- -c baid.toml check-config
+cargo run -p server -- -c baid.toml
 ```
 
 `just up` (local Neo4j, MinIO, Prometheus and Grafana) and `just bench-small` come with the

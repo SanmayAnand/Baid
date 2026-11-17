@@ -6,5 +6,15 @@ license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[dependencies]
+async-trait.workspace = true
+baid-core.workspace = true
+dashmap.workspace = true
+foyer.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+proptest.workspace = true
+
 [lints]
 workspace = true

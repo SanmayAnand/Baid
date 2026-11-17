@@ -6,5 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[dependencies]
+baid-core.workspace = true
+
 [lints]
 workspace = true

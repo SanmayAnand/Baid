@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
+use crate::error::RequestError;
 use crate::item::MemoryItem;
 use crate::types::{EntityId, NodeId};
 
@@ -35,6 +36,22 @@ pub struct Fact {
 impl Fact {
     /// Longest accepted fact text, in bytes.
     pub const MAX_TEXT_BYTES: usize = 32 * 1024;
+    /// Most entities a fact may name.
+    pub const MAX_ENTITIES: usize = 64;
+
+    /// Checks the parts of a fact that types alone cannot.
+    pub fn validate(&self) -> Result<(), RequestError> {
+        if self.text.trim().is_empty() {
+            return Err(RequestError::EmptyText);
+        }
+        if self.text.len() > Self::MAX_TEXT_BYTES {
+            return Err(RequestError::TextTooLong(self.text.len()));
+        }
+        if self.entities.len() > Self::MAX_ENTITIES {
+            return Err(RequestError::TooManyEntities(self.entities.len()));
+        }
+        Ok(())
+    }
 }
 
 /// A backend's acknowledgement of a write.

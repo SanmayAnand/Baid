@@ -14,6 +14,6 @@ Trade-off accepted: Writes must flow through BAiD to be instant.
 
 ## Status
 
-Accepted
+Accepted. The version mechanism is amended by [ADR-011](011-write-sequence-staleness.md).
 
 Source: architecture.md section 13. Change this decision only with a new ADR.

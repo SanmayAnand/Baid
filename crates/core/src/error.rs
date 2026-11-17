@@ -31,9 +31,15 @@ pub enum RequestError {
     /// The query is longer than the limit (bytes given).
     #[error("query is {0} bytes; the limit is 4096")]
     QueryTooLong(usize),
-    /// Too many entity ids in the filters (count given).
-    #[error("{0} entity filters; the limit is 64")]
+    /// Too many entity ids in the filters or a fact (count given).
+    #[error("{0} entities; the limit is 64")]
     TooManyEntities(usize),
+    /// A fact with no text.
+    #[error("fact text is empty")]
+    EmptyText,
+    /// A fact longer than the limit (bytes given).
+    #[error("fact text is {0} bytes; the limit is 32768")]
+    TextTooLong(usize),
 }
 
 /// A backend call failed. Adapters map every driver error into one of these.
