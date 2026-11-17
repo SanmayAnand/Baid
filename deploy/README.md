@@ -4,4 +4,4 @@ Will hold `docker-compose.yml` (BAiD, Neo4j, MinIO, Prometheus, Grafana), Helm c
 the sidecar and shared-service topologies, and the Grafana dashboard JSON
 (code-architecture.md section 1).
 
-Owned by Person B. Not set up yet.
+Not set up yet; see docs/build-plan.md.

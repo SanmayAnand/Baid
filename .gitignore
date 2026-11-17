@@ -9,7 +9,8 @@ bench/raw/
 
 # Logs
 *.log
-CLAUDE.md
-CONTRIBUTING.md
-.github/
-.claude/
+
+# Personal Claude Code files. The shared ones (CLAUDE.md, .claude/settings.json) are committed.
+CLAUDE.local.md
+.claude/settings.local.json
+.claude/worktrees/

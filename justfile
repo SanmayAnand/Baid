@@ -6,10 +6,11 @@ set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
 default:
     @just --list
 
-# fmt check, clippy with warnings as errors, all tests
+# fmt check, clippy with warnings as errors, layer and spawn rules, all tests
 check:
     cargo fmt --all --check
     cargo clippy --workspace --all-targets -- -D warnings
+    cargo xtask all
     cargo test --workspace
 
 # Format the whole workspace
@@ -26,16 +27,16 @@ deny:
 
 # Start Neo4j, MinIO, Prometheus and Grafana
 up:
-    @echo "owned by Person B, not set up yet"
+    @echo "not set up yet (see docs/build-plan.md)"
 
 # Load a synthetic dataset into the local stack
 load:
-    @echo "owned by Person B, not set up yet"
+    @echo "not set up yet (see docs/build-plan.md)"
 
 # Run the memharness benchmark
 bench:
-    @echo "owned by Person B, not set up yet"
+    @echo "not set up yet (see docs/build-plan.md)"
 
 # memharness small run (referenced by CLAUDE.md)
 bench-small:
-    @echo "owned by Person B, not set up yet"
+    @echo "not set up yet (see docs/build-plan.md)"
