@@ -1,34 +1,28 @@
-//! An in-memory [`Backend`] for tests in every crate. Enabled by the `test-util` feature.
-//!
-//! Search is naive word overlap; it exists to make engine behaviour observable (call counts,
-//! injected failures, tenant isolation), not to rank well.
+//! [`MockBackend`]: a [`MemoryBackend`] with call counters and failure injection, for tests
+//! in every crate. Enabled by the `test-util` feature.
 
-use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
 
 use crate::backend::{BackendResult, Capabilities, Fact, Health, WriteAck};
 use crate::error::BackendError;
-use crate::item::MemoryItem;
-use crate::key::normalise;
+use crate::memory::MemoryBackend;
 use crate::traits::Backend;
-use crate::types::{AdapterId, BackendQuery, EntityId, NodeId, TenantId};
+use crate::types::{AdapterId, BackendQuery, NodeId, TenantId};
 
 #[derive(Default)]
-struct State {
-    items: HashMap<TenantId, Vec<MemoryItem>>,
+struct Faults {
     failures: VecDeque<BackendError>,
     health: Option<Health>,
 }
 
-/// An in-memory backend with call counters and failure injection.
+/// An in-memory backend (adapter id `mock`) that counts calls and fails on demand.
 pub struct MockBackend {
-    id: AdapterId,
-    caps: Capabilities,
-    state: Mutex<State>,
-    next_node: AtomicU64,
+    inner: MemoryBackend,
+    faults: Mutex<Faults>,
     query_calls: AtomicUsize,
     queries: AtomicUsize,
     write_calls: AtomicUsize,
@@ -41,19 +35,11 @@ impl Default for MockBackend {
 }
 
 impl MockBackend {
-    /// A mock with id `mock`, native batching and neighbourhood support.
+    /// An empty mock.
     pub fn new() -> Self {
         MockBackend {
-            id: AdapterId::new("mock").unwrap_or_else(|_| unreachable!("valid id")),
-            caps: Capabilities {
-                native_batch: true,
-                max_batch: 64,
-                neighbourhood: true,
-                change_feed: false,
-                versions: true,
-            },
-            state: Mutex::new(State::default()),
-            next_node: AtomicU64::new(1),
+            inner: MemoryBackend::with_id("mock"),
+            faults: Mutex::new(Faults::default()),
             query_calls: AtomicUsize::new(0),
             queries: AtomicUsize::new(0),
             write_calls: AtomicUsize::new(0),
@@ -65,42 +51,24 @@ impl MockBackend {
         Arc::new(self)
     }
 
-    fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    fn faults(&self) -> MutexGuard<'_, Faults> {
+        self.faults.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Stores an item directly, bypassing `write` and its counters. Returns its node id.
     pub fn seed(&self, tenant: &TenantId, text: &str, entities: &[&str]) -> NodeId {
-        let id = self.new_node_id();
-        let item = MemoryItem {
-            id: id.clone(),
-            text: Arc::from(text),
-            score: 0.0,
-            tokens: 0,
-            entities: entities
-                .iter()
-                .filter_map(|e| EntityId::new(e).ok())
-                .collect(),
-            as_of: None,
-            source: self.id.clone(),
-        };
-        self.lock()
-            .items
-            .entry(tenant.clone())
-            .or_default()
-            .push(item);
-        id
+        self.inner.seed(tenant, text, entities)
     }
 
     /// The next `query_batch` or `write` call fails with `err`. Queue several to fail
     /// several calls.
     pub fn fail_next(&self, err: BackendError) {
-        self.lock().failures.push_back(err);
+        self.faults().failures.push_back(err);
     }
 
     /// Overrides what `health` reports.
     pub fn set_health(&self, h: Health) {
-        self.lock().health = Some(h);
+        self.faults().health = Some(h);
     }
 
     /// Number of `query_batch` calls (round trips).
@@ -118,80 +86,19 @@ impl MockBackend {
         self.write_calls.load(Ordering::SeqCst)
     }
 
-    fn new_node_id(&self) -> NodeId {
-        let n = self.next_node.fetch_add(1, Ordering::SeqCst);
-        NodeId::new(format!("m{n}")).unwrap_or_else(|_| unreachable!("valid id"))
-    }
-
     fn take_failure(&self) -> Option<BackendError> {
-        self.lock().failures.pop_front()
-    }
-
-    fn run(&self, items: &[MemoryItem], q: &BackendQuery) -> BackendResult {
-        let mentions = |i: &MemoryItem, e: &EntityId| i.entities.iter().any(|x| x == e);
-        let mut hits: Vec<MemoryItem> = match q {
-            BackendQuery::Search {
-                text,
-                filters,
-                limit,
-            } => {
-                let norm = normalise(text);
-                let words: Vec<&str> = norm.split(' ').filter(|w| !w.is_empty()).collect();
-                let mut scored: Vec<MemoryItem> = items
-                    .iter()
-                    .filter(|i| {
-                        filters.entity_ids.is_empty()
-                            || filters.entity_ids.iter().any(|e| mentions(i, e))
-                    })
-                    .filter(|i| match (filters.since, i.as_of) {
-                        (Some(since), Some(at)) => at >= since,
-                        (Some(_), None) => false,
-                        (None, _) => true,
-                    })
-                    .filter_map(|i| {
-                        let text = normalise(&i.text);
-                        let n = words.iter().filter(|w| text.contains(**w)).count();
-                        (n > 0).then(|| {
-                            let mut i = i.clone();
-                            i.score = n as f32 / words.len().max(1) as f32;
-                            i
-                        })
-                    })
-                    .collect();
-                scored.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
-                scored.truncate(usize::from(*limit));
-                scored
-            }
-            BackendQuery::Neighbourhood { entity, limit, .. } => items
-                .iter()
-                .filter(|i| mentions(i, entity))
-                .take(usize::from(*limit))
-                .cloned()
-                .collect(),
-            BackendQuery::Entity { id } => items
-                .iter()
-                .filter(|i| mentions(i, id))
-                .take(1)
-                .cloned()
-                .collect(),
-        };
-        for i in &mut hits {
-            if i.score == 0.0 {
-                i.score = 1.0;
-            }
-        }
-        BackendResult { items: hits }
+        self.faults().failures.pop_front()
     }
 }
 
 #[async_trait]
 impl Backend for MockBackend {
     fn id(&self) -> AdapterId {
-        self.id.clone()
+        self.inner.id()
     }
 
     fn capabilities(&self) -> Capabilities {
-        self.caps
+        self.inner.capabilities()
     }
 
     async fn query_batch(
@@ -204,9 +111,7 @@ impl Backend for MockBackend {
         if let Some(e) = self.take_failure() {
             return Err(e);
         }
-        let state = self.lock();
-        let items = state.items.get(tenant).map_or(&[][..], Vec::as_slice);
-        Ok(queries.iter().map(|q| self.run(items, q)).collect())
+        Ok(self.inner.query_now(tenant, queries))
     }
 
     async fn write(&self, tenant: &TenantId, fact: &Fact) -> Result<WriteAck, BackendError> {
@@ -214,37 +119,18 @@ impl Backend for MockBackend {
         if let Some(e) = self.take_failure() {
             return Err(e);
         }
-        let node = self.new_node_id();
-        let item = MemoryItem {
-            id: node.clone(),
-            text: Arc::from(fact.text.as_str()),
-            score: 0.0,
-            tokens: 0,
-            entities: fact.entities.iter().cloned().collect(),
-            as_of: fact.as_of,
-            source: self.id.clone(),
-        };
-        self.lock()
-            .items
-            .entry(tenant.clone())
-            .or_default()
-            .push(item);
-        Ok(WriteAck {
-            node,
-            entities: fact.entities.clone(),
-            version: Some(1),
-        })
+        Ok(self.inner.write_now(tenant, fact))
     }
 
     async fn health(&self) -> Health {
-        self.lock().health.clone().unwrap_or(Health::Up)
+        self.faults().health.clone().unwrap_or(Health::Up)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Filters;
+    use crate::types::{EntityId, Filters};
 
     /// Minimal executor so this crate stays free of an async runtime.
     fn block_on<F: std::future::Future>(f: F) -> F::Output {

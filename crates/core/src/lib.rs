@@ -7,6 +7,7 @@ pub mod config;
 pub mod error;
 pub mod item;
 pub mod key;
+pub mod memory;
 pub mod predict;
 pub mod request;
 pub mod traits;
@@ -23,10 +24,11 @@ pub use config::{
 };
 pub use error::{BackendError, IdError, RequestError, TokenBudgetError};
 pub use item::{
-    CacheEntry, CacheOutcome, FlushScope, InvalidationReport, MemoryItem, PackedContext, Priority,
-    PutOutcome,
+    CacheEntry, CacheOutcome, FlushScope, InvalidationReport, LoadInfo, MemoryItem, PackedContext,
+    Priority, PutOutcome, WriteSeq,
 };
 pub use key::{normalise, Key, KEY_PREFIX, SCHEMA_VERSION};
+pub use memory::MemoryBackend;
 pub use predict::{
     Candidate, PredictionSource, QueryClass, RecallRecord, ScoredClass, SessionView, TenantStats,
 };
@@ -36,3 +38,4 @@ pub use types::{
     AdapterId, BackendQuery, BudgetBucket, EntityId, Filters, KeyKind, NodeId, SessionId, TenantId,
     TokenBudget,
 };
+pub use units::{ByteSize, HumanDuration, UnitError};

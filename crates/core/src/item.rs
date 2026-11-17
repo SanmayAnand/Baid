@@ -61,13 +61,26 @@ pub enum Priority {
     Hub = 2,
 }
 
+/// A per-tenant write sequence number. Every acknowledged write takes the next one.
+pub type WriteSeq = u64;
+
 /// A cached query result plus everything needed to decide whether it may still be served.
+///
+/// # Staleness
+///
+/// `loaded_at` is the tenant's [`WriteSeq`] read *before* the backend call. Each write
+/// stamps the entities it touched with its own sequence number. The entry is valid only
+/// while no entity in [`entities`](Self::entities) carries a stamp newer than `loaded_at`;
+/// [`crate::CacheStore`] checks this on put and on every get.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CacheEntry {
     /// The items, in backend order.
     pub items: Vec<MemoryItem>,
-    /// Entity versions seen when the load *started*; the stale-put check compares these.
-    pub versions: SmallVec<[(EntityId, u64); 8]>,
+    /// Every entity the result depends on: those the query named plus those the items
+    /// mention. Sorted, deduplicated.
+    pub entities: SmallVec<[EntityId; 8]>,
+    /// The tenant's write sequence number when the load started.
+    pub loaded_at: WriteSeq,
     /// True for a prefetched entry until its first hit.
     pub speculative: bool,
     /// Eviction priority.
@@ -82,38 +95,60 @@ pub struct CacheEntry {
     pub approx_bytes: u32,
 }
 
+/// What is known about a load when its entry is built.
+#[derive(Clone, Debug)]
+pub struct LoadInfo<'a> {
+    /// Entities the query named (see [`crate::BackendQuery::entities`]).
+    pub query_entities: &'a [EntityId],
+    /// The tenant's write sequence number read before the backend call.
+    pub loaded_at: WriteSeq,
+    /// The adapter that served it.
+    pub source: AdapterId,
+    /// Time to live.
+    pub ttl: Duration,
+    /// Prefetched rather than asked for.
+    pub speculative: bool,
+}
+
 impl CacheEntry {
     /// Builds an entry. `now` is passed in so callers (and tests) control the clock.
-    pub fn new(
-        items: Vec<MemoryItem>,
-        versions: &[(EntityId, u64)],
-        source: AdapterId,
-        ttl: Duration,
-        speculative: bool,
-        now: Instant,
-    ) -> Self {
+    pub fn new(items: Vec<MemoryItem>, load: LoadInfo<'_>, now: Instant) -> Self {
+        let mut entities: SmallVec<[EntityId; 8]> = load
+            .query_entities
+            .iter()
+            .cloned()
+            .chain(items.iter().flat_map(|i| i.entities.iter().cloned()))
+            .collect();
+        entities.sort_unstable();
+        entities.dedup();
         let item_bytes: usize = items.iter().map(MemoryItem::approx_bytes).sum();
-        let total = std::mem::size_of::<CacheEntry>() + item_bytes;
+        let entity_bytes: usize = entities
+            .iter()
+            .map(|e| e.as_str().len() + std::mem::size_of::<EntityId>())
+            .sum();
+        let total = std::mem::size_of::<CacheEntry>() + item_bytes + entity_bytes;
         CacheEntry {
             items,
-            versions: versions.iter().cloned().collect(),
-            speculative,
-            priority: if speculative {
+            entities,
+            loaded_at: load.loaded_at,
+            speculative: load.speculative,
+            priority: if load.speculative {
                 Priority::Speculative
             } else {
                 Priority::Normal
             },
             created_at: now,
-            expires_at: now.checked_add(ttl).unwrap_or(now),
-            source,
+            expires_at: now.checked_add(load.ttl).unwrap_or(now),
+            source: load.source,
             approx_bytes: u32::try_from(total).unwrap_or(u32::MAX),
         }
     }
 
-    /// May this entry be served at `now`?
+    /// May this entry be served at `now`, by TTL and the caller's `max_staleness`?
     ///
     /// False once expired. With `max_staleness`, also false when the entry is older than
-    /// that; `Some(Duration::ZERO)` therefore never accepts a cached entry.
+    /// that; `Some(Duration::ZERO)` therefore never accepts a cached entry. Write
+    /// staleness is checked separately by the cache store.
     pub fn is_fresh(&self, now: Instant, max_staleness: Option<Duration>) -> bool {
         if now >= self.expires_at {
             return false;
@@ -133,19 +168,9 @@ impl CacheEntry {
         e
     }
 
-    /// Every entity the entry depends on: those named in item metadata plus those whose
-    /// versions were snapshotted. Sorted and deduplicated. The invalidator indexes the key
-    /// under all of them.
-    pub fn entities(&self) -> Vec<EntityId> {
-        let mut out: Vec<EntityId> = self
-            .items
-            .iter()
-            .flat_map(|i| i.entities.iter().cloned())
-            .chain(self.versions.iter().map(|(e, _)| e.clone()))
-            .collect();
-        out.sort_unstable();
-        out.dedup();
-        out
+    /// Every entity the entry depends on, sorted and deduplicated.
+    pub fn entities(&self) -> &[EntityId] {
+        &self.entities
     }
 }
 
@@ -179,8 +204,10 @@ pub enum PutOutcome {
     /// A version seen at load start has moved: a write happened meanwhile, so the entry
     /// was dropped instead of re-inserting stale data.
     StaleVersion,
-    /// The entry is larger than the tenant's whole capacity.
+    /// The entry is larger than the tier's per-entry limit.
     TooLarge,
+    /// The key's tenant has no cache tier configured.
+    UnknownTenant,
 }
 
 /// What [`crate::CacheStore::flush`] removes.
@@ -230,13 +257,21 @@ mod tests {
         }
     }
 
+    fn load(query_entities: &[EntityId], ttl: Duration, speculative: bool) -> LoadInfo<'_> {
+        LoadInfo {
+            query_entities,
+            loaded_at: 3,
+            source: AdapterId::new("bolt").unwrap(),
+            ttl,
+            speculative,
+        }
+    }
+
     fn entry(ttl_s: u64, speculative: bool, now: Instant) -> CacheEntry {
+        let q = [EntityId::new("acme").unwrap()];
         CacheEntry::new(
             vec![item("n1", "acme renews in March", &["acme"])],
-            &[(EntityId::new("acme").unwrap(), 3)],
-            AdapterId::new("bolt").unwrap(),
-            Duration::from_secs(ttl_s),
-            speculative,
+            load(&q, Duration::from_secs(ttl_s), speculative),
             now,
         )
     }
@@ -272,13 +307,22 @@ mod tests {
     }
 
     #[test]
-    fn entities_are_union_sorted_and_deduped() {
-        let t0 = Instant::now();
-        let mut e = entry(60, false, t0);
-        e.items
-            .push(item("n2", "globex and acme", &["globex", "acme"]));
-        let names: Vec<String> = e.entities().into_iter().map(String::from).collect();
-        assert_eq!(names, ["acme", "globex"]);
+    fn entities_are_union_of_query_and_items() {
+        let q = [
+            EntityId::new("zeta").unwrap(),
+            EntityId::new("acme").unwrap(),
+        ];
+        let e = CacheEntry::new(
+            vec![
+                item("n1", "acme", &["acme"]),
+                item("n2", "globex and acme", &["globex", "acme"]),
+            ],
+            load(&q, Duration::from_secs(60), false),
+            Instant::now(),
+        );
+        let names: Vec<&str> = e.entities().iter().map(EntityId::as_str).collect();
+        assert_eq!(names, ["acme", "globex", "zeta"]);
+        assert_eq!(e.loaded_at, 3);
     }
 
     #[test]
@@ -287,28 +331,14 @@ mod tests {
         let small = entry(60, false, t0);
         let mut big = small.clone();
         big.items[0].text = Arc::from("x".repeat(10_000));
-        let big = CacheEntry::new(
-            big.items,
-            &[],
-            AdapterId::new("bolt").unwrap(),
-            Duration::from_secs(1),
-            false,
-            t0,
-        );
+        let big = CacheEntry::new(big.items, load(&[], Duration::from_secs(1), false), t0);
         assert!(big.approx_bytes >= small.approx_bytes + 9_000);
     }
 
     #[test]
     fn huge_ttl_does_not_panic() {
         let t0 = Instant::now();
-        let e = CacheEntry::new(
-            vec![],
-            &[],
-            AdapterId::new("bolt").unwrap(),
-            Duration::MAX,
-            false,
-            t0,
-        );
+        let e = CacheEntry::new(vec![], load(&[], Duration::MAX, false), t0);
         assert!(e.expires_at >= t0);
     }
 

@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use crate::backend::{BackendResult, Capabilities, Fact, Health, WriteAck};
 use crate::error::BackendError;
 use crate::item::{
-    CacheEntry, FlushScope, InvalidationReport, MemoryItem, PackedContext, PutOutcome,
+    CacheEntry, FlushScope, InvalidationReport, MemoryItem, PackedContext, PutOutcome, WriteSeq,
 };
 use crate::key::Key;
 use crate::predict::{Candidate, QueryClass, SessionView, TenantStats};
@@ -52,27 +52,34 @@ pub trait Predictor: Send + Sync + 'static {
     fn observe(&self, tenant: &TenantId, prev: Option<&QueryClass>, next: &QueryClass);
 }
 
-/// The cache: tiers, TTLs, priorities, and the entity versions behind the stale-put guard.
+/// The cache: tiers, TTLs, priorities, and the write log behind the staleness guard.
 ///
-/// # The version guard
+/// # The staleness guard
 ///
-/// Each `(tenant, entity)` has a version number. A loader snapshots the versions of the
-/// entities it will read *before* calling the backend
-/// ([`snapshot_versions`](Self::snapshot_versions)) and stores the snapshot in
-/// [`CacheEntry::versions`]. A writer bumps the versions
-/// ([`bump_versions`](Self::bump_versions)) *before* evicting keys. [`put`](Self::put)
-/// refuses an entry whose snapshot no longer matches, so a slow read that started before a
-/// write can never re-insert pre-write data.
+/// Each tenant has a write sequence number, and each entity remembers the sequence number
+/// of the last write that touched it.
+///
+/// - A loader reads [`write_seq`](Self::write_seq) *before* calling the backend and stores
+///   it in [`CacheEntry::loaded_at`].
+/// - A writer, after the backend acknowledges, calls [`mark_written`](Self::mark_written)
+///   with every entity it touched.
+/// - An entry is valid only while none of its [`CacheEntry::entities`] (query-named *and*
+///   result-mentioned) was written after `loaded_at`. [`put`](Self::put) refuses invalid
+///   entries and [`get`](Self::get) never returns one.
+///
+/// So a slow read that started before a write can never serve pre-write data, even when
+/// the write touched an entity that only showed up in the results.
 #[async_trait]
 pub trait CacheStore: Send + Sync + 'static {
-    /// The entry under `key`, if present and not expired. Does not check `max_staleness`;
-    /// see [`CacheEntry::is_fresh`].
+    /// The entry under `key`, if present, unexpired and not invalidated by a write. Does
+    /// not check `max_staleness`; see [`CacheEntry::is_fresh`].
     async fn get(&self, key: &Key) -> Option<Arc<CacheEntry>>;
 
     /// True if `key` is present. Cheap; used to skip prefetching what is already cached.
+    /// May report an entry that `get` would refuse.
     fn contains(&self, key: &Key) -> bool;
 
-    /// Inserts `entry` unless any `(entity, version)` in `entry.versions` has moved, in
+    /// Inserts `entry` unless one of its entities was written after `entry.loaded_at`, in
     /// which case nothing is stored and [`PutOutcome::StaleVersion`] is returned.
     async fn put(&self, key: Key, entry: CacheEntry) -> PutOutcome;
 
@@ -85,11 +92,12 @@ pub trait CacheStore: Send + Sync + 'static {
     /// Removes everything in `scope`. Returns how many entries went.
     async fn flush(&self, scope: FlushScope) -> usize;
 
-    /// Current versions of `entities` for `tenant` (entities never written are version 0).
-    fn snapshot_versions(&self, tenant: &TenantId, entities: &[EntityId]) -> Vec<(EntityId, u64)>;
+    /// The tenant's current write sequence number. Read it before a backend call.
+    fn write_seq(&self, tenant: &TenantId) -> WriteSeq;
 
-    /// Increments the versions of `entities`. Returns how many were bumped.
-    fn bump_versions(&self, tenant: &TenantId, entities: &[EntityId]) -> usize;
+    /// Records an acknowledged write to `entities`: takes the tenant's next sequence number,
+    /// stamps the entities with it, and returns it.
+    fn mark_written(&self, tenant: &TenantId, entities: &[EntityId]) -> WriteSeq;
 }
 
 /// Turns recalled items into the context the agent sees. Pure CPU; under 3 ms for 200 items.
@@ -101,11 +109,11 @@ pub trait Packer: Send + Sync + 'static {
 /// Keeps cached results consistent with writes.
 #[async_trait]
 pub trait Invalidator: Send + Sync + 'static {
-    /// Records that `key`'s result depends on `entities`. Called *before* the entry is put,
-    /// so a write that lands in between still finds and evicts the key.
+    /// Records that `key`'s result depends on `entities`, so a later write can evict it.
     fn register(&self, key: &Key, entities: &[EntityId]);
 
-    /// A write to `entities` was acknowledged: bump their versions, then evict every key
-    /// that depends on them.
+    /// A write to `entities` was acknowledged and marked: evict every key that depends on
+    /// them. This frees memory early; correctness already comes from the write log in
+    /// [`CacheStore`].
     async fn on_write(&self, tenant: &TenantId, entities: &[EntityId]) -> InvalidationReport;
 }

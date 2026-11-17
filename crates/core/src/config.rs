@@ -91,6 +91,9 @@ pub enum AdapterKind {
     Zep,
     /// Mem0 (after launch).
     Mem0,
+    /// In-process and non-durable: data is lost on restart. For development, demos and
+    /// smoke tests. `adapter_url` is ignored (use `memory://`).
+    Memory,
 }
 
 impl AdapterKind {
@@ -101,6 +104,7 @@ impl AdapterKind {
             AdapterKind::S3 => "s3",
             AdapterKind::Zep => "zep",
             AdapterKind::Mem0 => "mem0",
+            AdapterKind::Memory => "memory",
         }
     }
 
@@ -361,15 +365,21 @@ impl Config {
                 "must be at most 10s",
             );
         }
-        // Tenants may oversubscribe the instance (not every tenant is hot at once), but a
-        // single tenant larger than the whole tier is a mistake.
-        for t in &self.tenants {
-            is.check(
-                t.ram_bytes <= self.cache.ram_bytes,
-                format!("tenants[{}].ram_bytes", t.id),
-                "is larger than cache.ram_bytes",
-            );
-        }
+        // Each tenant gets its own RAM tier of `ram_bytes`, so the instance really uses the
+        // sum. Refuse configs that would exceed the instance budget.
+        let total: u64 = self
+            .tenants
+            .iter()
+            .fold(0u64, |acc, t| acc.saturating_add(t.ram_bytes.bytes()));
+        is.check(
+            total <= self.cache.ram_bytes.bytes(),
+            "tenants[].ram_bytes",
+            format!(
+                "tenants need {} in total but cache.ram_bytes is {}",
+                ByteSize(total),
+                self.cache.ram_bytes
+            ),
+        );
 
         if is.0.is_empty() {
             Ok(())
@@ -503,6 +513,17 @@ adapter_url = "s3://memories"
     #[test]
     fn no_tenants_is_an_error() {
         assert_eq!(fields(&Config::default()), ["tenants"]);
+    }
+
+    #[test]
+    fn tenant_ram_must_fit_the_instance() {
+        let mut c = parse(EXAMPLE);
+        c.cache.ram_bytes = ByteSize::mib(300);
+        let mut t2 = c.tenants[0].clone();
+        t2.id = TenantId::new("globex").unwrap();
+        t2.api_key_env = "BAID_KEY_GLOBEX".into();
+        c.tenants.push(t2); // 2 x 256MiB > 300MiB
+        assert_eq!(fields(&c), ["tenants[].ram_bytes"]);
     }
 
     #[test]
