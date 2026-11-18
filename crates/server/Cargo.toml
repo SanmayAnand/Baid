@@ -18,6 +18,7 @@ path = "src/main.rs"
 adapters.workspace = true
 cache.workspace = true
 dashmap.workspace = true
+exec.workspace = true
 pack.workspace = true
 session.workspace = true
 time = { workspace = true, features = ["serde", "parsing", "formatting"] }
@@ -37,9 +38,11 @@ tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
+serde_norway.workspace = true
 async-trait.workspace = true
+futures.workspace = true
 baid-core = { workspace = true, features = ["test-util"] }
-tokio = { workspace = true, features = ["io-util", "test-util"] }
+tokio = { workspace = true, features = ["io-util", "test-util", "sync"] }
 toml.workspace = true
 figment = { workspace = true, features = ["toml", "env", "test"] }
 tower = { workspace = true, features = ["util"] }

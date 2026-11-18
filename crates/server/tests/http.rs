@@ -22,7 +22,7 @@ use tower::ServiceExt;
 const ACME_KEY: &str = "acme-key-0123456789";
 const GLOBEX_KEY: &str = "globex-key-0123456789";
 
-fn state() -> AppState {
+async fn state() -> AppState {
     let config: Config = toml::from_str(
         r#"
 [[tenants]]
@@ -42,7 +42,7 @@ adapter_url = "memory://"
     config.validate().unwrap();
     let env: HashMap<&str, &str> = [("K_ACME", ACME_KEY), ("K_GLOBEX", GLOBEX_KEY)].into();
     let secrets = resolve_secrets(&config, |k| env.get(k).map(|v| v.to_string())).unwrap();
-    State::build(config, secrets).unwrap()
+    State::build(config, secrets).await.unwrap()
 }
 
 async fn call(app: Router, path: &str, auth: Option<&str>) -> (StatusCode, Value) {
@@ -61,14 +61,14 @@ async fn call(app: Router, path: &str, auth: Option<&str>) -> (StatusCode, Value
 
 #[tokio::test]
 async fn health_needs_no_key() {
-    let (s, body) = call(public_router(state()), "/healthz", None).await;
+    let (s, body) = call(public_router(state().await), "/healthz", None).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(body["status"], "ok");
 }
 
 #[tokio::test]
 async fn api_without_or_with_bad_key_is_401() {
-    let app = public_router(state());
+    let app = public_router(state().await);
     for auth in [
         None,
         Some("Bearer wrong-key-0123456789"),
@@ -84,7 +84,7 @@ async fn api_without_or_with_bad_key_is_401() {
 
 #[tokio::test]
 async fn the_key_decides_the_tenant() {
-    let app = public_router(state());
+    let app = public_router(state().await);
     let (s, body) = call(
         app.clone(),
         "/v1/whoami",
@@ -99,14 +99,14 @@ async fn the_key_decides_the_tenant() {
 
 #[tokio::test]
 async fn unknown_route_is_json_404() {
-    let (s, body) = call(public_router(state()), "/v2/nothing", None).await;
+    let (s, body) = call(public_router(state().await), "/v2/nothing", None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     assert_eq!(body["error"]["code"], "not_found");
 }
 
 #[tokio::test]
 async fn readyz_flips_when_draining() {
-    let st = state();
+    let st = state().await;
     let (s, _) = call(public_router(st.clone()), "/readyz", None).await;
     assert_eq!(s, StatusCode::OK);
     st.set_ready(false);
@@ -131,7 +131,7 @@ async fn serves_both_listeners_and_stops_on_cancel() {
     let (pa, aa) = (public.local_addr().unwrap(), admin.local_addr().unwrap());
     let shutdown = CancellationToken::new();
 
-    let server = serve(state(), public, admin, shutdown.clone());
+    let server = serve(state().await, public, admin, shutdown.clone());
     let client = async {
         let p = http_get(pa, "/healthz").await;
         let a = http_get(aa, "/readyz").await;

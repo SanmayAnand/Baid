@@ -1,0 +1,47 @@
+name: Adapter contract
+
+# The Backend contract and the live adapter tests, against real Neo4j and S3 (SeaweedFS).
+# The offline half of the contract (memory and in-memory S3) already runs in ci.yml.
+
+on:
+  pull_request:
+    paths:
+      - "crates/adapters/**"
+      - "crates/core/**"
+      - "deploy/**"
+      - "Cargo.lock"
+      - ".github/workflows/contract.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  contract:
+    name: adapters against live backends
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Start Neo4j and SeaweedFS
+        run: |
+          docker compose -f deploy/docker-compose.yml up -d --wait neo4j seaweedfs
+          docker compose -f deploy/docker-compose.yml exec -T seaweedfs \
+            sh -c "echo s3.bucket.create -name baid | weed shell -master=localhost:9333"
+
+      - name: Contract and live adapter tests
+        env:
+          BAID_TEST_NEO4J_URL: bolt://127.0.0.1:7687
+          BAID_TEST_NEO4J_PASSWORD: baid-dev-password
+          BAID_TEST_S3_URL: s3://baid/contract?endpoint=http://127.0.0.1:8333
+        run: cargo test -p adapters --test bolt_live --test contract -- --test-threads=4
+
+      - name: Service logs
+        if: failure()
+        run: docker compose -f deploy/docker-compose.yml logs

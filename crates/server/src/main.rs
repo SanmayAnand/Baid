@@ -7,7 +7,7 @@ use clap::Parser;
 use server::cli::{Cli, Command, ServeArgs};
 use server::config::{load, resolve_secrets, Overrides};
 use server::run::{serve, shutdown_on_signal};
-use server::state::State;
+use server::state::{credentials, State};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -35,8 +35,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Some(Command::Serve(a)) => a,
         Some(Command::CheckConfig) => {
             let config = load(&cli.config, &Overrides::default())?;
-            resolve_secrets(&config, |k| std::env::var(k).ok())?;
-            adapters::Registry::from_config(&config)?;
+            let secrets = resolve_secrets(&config, |k| std::env::var(k).ok())?;
+            adapters::Registry::from_config(&config, |t| credentials(&secrets, t)).await?;
             println!(
                 "{}: ok ({} tenant(s))",
                 cli.config.display(),
@@ -65,7 +65,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         "baid started"
     );
 
-    let state = State::build(config, secrets)?;
+    let state = State::build(config, secrets).await?;
     let shutdown = CancellationToken::new();
     let server = serve(state.clone(), public, admin, shutdown.clone());
     tokio::pin!(server);

@@ -1,0 +1,17 @@
+# Scrapes BAiD's admin port on the host. BAiD's /metrics endpoint arrives with plan T21;
+# until then the `baid` target shows as down, which is expected.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: baid
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:7071"]
+        labels:
+          instance: local
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

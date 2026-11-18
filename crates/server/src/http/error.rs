@@ -41,6 +41,19 @@ pub enum ApiError {
 }
 
 impl ApiError {
+    /// Every code an error response can carry. `api/openapi.yaml` lists exactly these;
+    /// the contract test checks it.
+    pub const CODES: &'static [&'static str] = &[
+        "unauthorized",
+        "invalid_argument",
+        "budget_too_small",
+        "backend_unavailable",
+        "backend_error",
+        "rate_limited",
+        "not_found",
+        "internal",
+    ];
+
     /// HTTP status.
     pub fn status(&self) -> StatusCode {
         match self {
@@ -158,11 +171,18 @@ mod tests {
             (ApiError::Internal, 500, "internal", true),
             (ApiError::NotFound, 404, "not_found", false),
         ];
+        let mut seen = std::collections::BTreeSet::new();
         for (err, status, code, retry) in cases {
             assert_eq!(err.status().as_u16(), status, "{err:?}");
             assert_eq!(err.code(), code, "{err:?}");
             assert_eq!(err.retryable(), retry, "{err:?}");
+            seen.insert(code);
         }
+        let all: std::collections::BTreeSet<_> = ApiError::CODES.iter().copied().collect();
+        assert_eq!(
+            seen, all,
+            "CODES must list exactly the codes the variants produce"
+        );
     }
 
     #[test]

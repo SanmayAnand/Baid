@@ -8,10 +8,10 @@ agent's token budget. Agent tasks get faster and cheaper with no change to the d
 BAiD is a layer, not a database. It never holds source-of-truth data: everything it caches can
 be dropped and rebuilt from the backend.
 
-> **Status: pre-alpha.** `recall` and `remember` work end to end over HTTP against the
-> in-process `memory` adapter, with the RAM cache, API-key auth and the staleness guarantees
-> below. Neo4j and S3 adapters, prefetch and MCP are next. See the
-> [build plan](docs/build-plan.md).
+> **Status: pre-alpha.** `recall` and `remember` work end to end over HTTP against Neo4j
+> (the `bolt` adapter) or the in-process `memory` adapter, with the RAM cache, API-key auth,
+> retries and a circuit breaker, and the staleness guarantees below. S3 (and S3-compatible
+> stores) work through the `s3` adapter. Prefetch and MCP are next. See the [build plan](docs/build-plan.md).
 
 ## Why
 
@@ -104,13 +104,16 @@ Requirements: Rust stable 1.91 or newer (picked up from `rust-toolchain.toml`) a
 just check        # fmt, clippy -D warnings, layer and spawn rules, all tests
 cargo xtask all   # just the repository rules
 just deny         # licences, advisories, bans
+just up           # local Neo4j, SeaweedFS (S3), Prometheus, Grafana
+just test-live    # adapter tests against the local stack
 
 # run the server against a config (each tenant's API key comes from its api_key_env)
 cargo run -p server -- -c baid.toml check-config
 cargo run -p server -- -c baid.toml
 ```
 
-`just up` (local Neo4j, MinIO, Prometheus and Grafana) and `just bench-small` come with the
+`just up` starts the local stack (Neo4j, SeaweedFS for S3, Prometheus, Grafana; see
+[deploy/](deploy/README.md)). `just bench-small` comes with the
 benchmark harness.
 
 ## Configuration
@@ -156,7 +159,7 @@ One binary, three topologies; only the config changes.
 | --- | --- | --- |
 | Sidecar | One agent app, strict latency | RAM tier only, one tenant |
 | Shared service | Many apps or users on one memory | NVMe tier on, many tenants, router hashes tenant then session |
-| Local dev | Demos, benchmarks, contributors | docker-compose seeds Neo4j and MinIO |
+| Local dev | Demos, benchmarks, contributors | docker-compose runs Neo4j and SeaweedFS (S3) |
 
 ## Documentation
 

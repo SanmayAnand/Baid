@@ -12,6 +12,9 @@
 //!   the cache refuses any entry that depends on them and was loaded earlier.
 //! - **Results a write would *add* to someone else's cached search** appear within the
 //!   tenant's TTL, the same bound as writes made outside BAiD.
+//! - **One backend call per key at a time.** Concurrent misses on the same key share one
+//!   load. Followers then re-read through the cache, so sharing never weakens the
+//!   guarantees above.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -19,9 +22,10 @@ use std::time::{Duration, Instant};
 use baid_core::{
     Backend, BackendError, BackendQuery, CacheEntry, CacheOutcome, CacheStore, EntityId, Fact, Key,
     LoadInfo, MemoryItem, NodeId, PackedContext, Packer, PutOutcome, RecallRequest, SessionId,
-    TenantId,
+    TenantId, WriteSeq,
 };
 use dashmap::DashMap;
+use exec::{Role, SingleFlight};
 use session::Sessions;
 use tracing::{debug, error, warn};
 
@@ -50,6 +54,15 @@ pub struct Remembered {
     pub version: Option<u64>,
     /// True when this answer was replayed for a repeated idempotency key.
     pub replayed: bool,
+}
+
+/// Extra time the engine allows beyond the tenant's backend timeout. The adapter layer
+/// (`adapters::Resilient`) enforces the real deadline and records the failure for its
+/// circuit breaker; this outer bound only catches a backend that ignores it.
+pub const BACKSTOP_MARGIN: Duration = Duration::from_millis(250);
+
+fn backstop(t: &Tenant) -> Duration {
+    t.config.backend_timeout.get() + BACKSTOP_MARGIN
 }
 
 /// Longest accepted idempotency key.
@@ -90,6 +103,61 @@ impl Idempotency {
     }
 }
 
+/// What a shared load yields: the items, or the backend failure every waiter sees.
+type LoadResult = Result<Arc<Vec<MemoryItem>>, BackendError>;
+
+/// One backend call plus the cache put, owning everything it needs so concurrent misses can
+/// share it (see [`SingleFlight`]).
+struct Load {
+    cache: Arc<dyn CacheStore>,
+    backend: Arc<dyn Backend>,
+    tenant: TenantId,
+    key: Key,
+    query: BackendQuery,
+    ttl: Duration,
+    deadline: Duration,
+    now: Instant,
+}
+
+impl Load {
+    async fn run(self) -> LoadResult {
+        // Read before the call: a write acknowledged after this point is newer than the
+        // entry, so the cache refuses it if the write touched any of its entities.
+        let loaded_at = self.cache.write_seq(&self.tenant);
+        let mut results = tokio::time::timeout(
+            self.deadline,
+            self.backend
+                .query_batch(&self.tenant, std::slice::from_ref(&self.query)),
+        )
+        .await
+        .map_err(|_| BackendError::Timeout(self.deadline))??;
+        if results.len() != 1 {
+            error!(tenant = %self.tenant, got = results.len(), "adapter returned the wrong number of results");
+            return Err(BackendError::Rejected(format!(
+                "adapter returned {} results for 1 query",
+                results.len()
+            )));
+        }
+        let items = results.pop().map(|r| r.items).unwrap_or_default();
+        let entry = CacheEntry::new(
+            items.clone(),
+            LoadInfo {
+                query_entities: self.query.entities(),
+                loaded_at,
+                source: self.backend.id(),
+                ttl: self.ttl,
+                speculative: false,
+            },
+            self.now,
+        );
+        match self.cache.put(self.key, entry).await {
+            PutOutcome::Stored => {}
+            other => debug!(tenant = %self.tenant, outcome = ?other, "result not cached"),
+        }
+        Ok(Arc::new(items))
+    }
+}
+
 /// The engine. Cheap to share behind an `Arc`.
 pub struct Engine {
     cache: Arc<dyn CacheStore>,
@@ -97,6 +165,7 @@ pub struct Engine {
     packer: Arc<dyn Packer>,
     sessions: Arc<Sessions>,
     idempotency: Idempotency,
+    flights: SingleFlight<LoadResult>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -122,6 +191,7 @@ impl Engine {
             packer,
             sessions,
             idempotency: Idempotency::default(),
+            flights: SingleFlight::new(),
         }
     }
 
@@ -138,7 +208,7 @@ impl Engine {
     }
 
     /// Answers a recall from the cache if it can, otherwise from the backend (and caches
-    /// the result).
+    /// the result). Concurrent misses on one key share a single backend call.
     pub async fn recall(&self, t: &Tenant, req: RecallRequest) -> Result<Recall, ApiError> {
         req.validate()?;
         let now = Instant::now();
@@ -149,67 +219,78 @@ impl Engine {
         let own_last_write = self.sessions.last_write(&t.id, &req.session);
 
         if !req.bypasses_cache() {
-            if let Some(e) = self.cache.get(&key).await {
-                if e.is_fresh(now, req.max_staleness) && e.loaded_at >= own_last_write {
-                    if e.speculative {
-                        self.cache.promote(&key);
-                    }
-                    return Ok(Recall {
-                        packed: self.packer.pack(&e.items, req.budget),
-                        outcome: CacheOutcome::Hit,
-                    });
-                }
+            if let Some(e) = self.servable(&key, now, &req, own_last_write).await {
+                return Ok(self.packed(&e.items, &req, CacheOutcome::Hit));
             }
         }
 
-        let items = self.load(t, backend.as_ref(), key, &query, now).await?;
-        Ok(Recall {
-            packed: self.packer.pack(&items, req.budget),
-            outcome: CacheOutcome::Miss,
-        })
+        let load = self.load(t, &backend, &key, &query, now);
+        let (result, role) = self.flights.run(&key, move || load.run()).await;
+        let items = result?;
+        if role == Role::Follower {
+            // We joined a load that may have started before something this request must
+            // see: this session's own last write, or another session's acknowledged write.
+            // Re-read through the cache, which applies every staleness check, and load
+            // directly if it refuses.
+            if let Some(e) = self.servable(&key, now, &req, own_last_write).await {
+                return Ok(self.packed(&e.items, &req, CacheOutcome::Miss));
+            }
+            let items = self.load(t, &backend, &key, &query, now).run().await?;
+            return Ok(self.packed(&items, &req, CacheOutcome::Miss));
+        }
+        Ok(self.packed(&items, &req, CacheOutcome::Miss))
     }
 
-    /// One backend call, then cache the result.
-    async fn load(
+    /// The cached entry for `key`, if this request may be served from it: present, valid
+    /// under the write log (checked by the store), within `max_staleness`, and loaded after
+    /// this session's own last write. Promotes a speculative entry on use.
+    async fn servable(
+        &self,
+        key: &Key,
+        now: Instant,
+        req: &RecallRequest,
+        own_last_write: WriteSeq,
+    ) -> Option<Arc<CacheEntry>> {
+        let e = self.cache.get(key).await?;
+        if !(e.is_fresh(now, req.max_staleness) && e.loaded_at >= own_last_write) {
+            return None;
+        }
+        if e.speculative {
+            self.cache.promote(key);
+        }
+        Some(e)
+    }
+
+    fn packed(&self, items: &[MemoryItem], req: &RecallRequest, outcome: CacheOutcome) -> Recall {
+        Recall {
+            packed: self.packer.pack(items, req.budget),
+            outcome,
+        }
+    }
+
+    fn load(
         &self,
         t: &Tenant,
-        backend: &dyn Backend,
-        key: Key,
+        backend: &Arc<dyn Backend>,
+        key: &Key,
         query: &BackendQuery,
         now: Instant,
-    ) -> Result<Vec<MemoryItem>, ApiError> {
-        // Read before the call: a write acknowledged after this point is newer than the
-        // entry, so the cache will refuse it if the write touched any of its entities.
-        let loaded_at = self.cache.write_seq(&t.id);
-        let deadline = t.config.backend_timeout.get();
-        let mut results = tokio::time::timeout(
-            deadline,
-            backend.query_batch(&t.id, std::slice::from_ref(query)),
-        )
-        .await
-        .map_err(|_| BackendError::Timeout(deadline))??;
-        if results.len() != 1 {
-            error!(tenant = %t.id, got = results.len(), "adapter returned the wrong number of results");
-            return Err(ApiError::Internal);
-        }
-        let items = results.pop().map(|r| r.items).unwrap_or_default();
-
-        let entry = CacheEntry::new(
-            items.clone(),
-            LoadInfo {
-                query_entities: query.entities(),
-                loaded_at,
-                source: backend.id(),
-                ttl: t.config.ttl.get(),
-                speculative: false,
-            },
+    ) -> Load {
+        Load {
+            cache: Arc::clone(&self.cache),
+            backend: Arc::clone(backend),
+            tenant: t.id.clone(),
+            key: key.clone(),
+            query: query.clone(),
+            ttl: t.config.ttl.get(),
+            deadline: backstop(t),
             now,
-        );
-        match self.cache.put(key, entry).await {
-            PutOutcome::Stored => {}
-            other => debug!(tenant = %t.id, outcome = ?other, "result not cached"),
         }
-        Ok(items)
+    }
+
+    /// Loads currently in flight (shared by concurrent misses).
+    pub fn loads_in_flight(&self) -> usize {
+        self.flights.in_flight()
     }
 
     /// Forwards a fact to the backend, then marks every entity it touched as written.
@@ -233,7 +314,7 @@ impl Engine {
             }
         }
         let backend = self.backend(t)?;
-        let deadline = t.config.backend_timeout.get();
+        let deadline = backstop(t);
         let result = tokio::time::timeout(deadline, backend.write(&t.id, &fact))
             .await
             .map_err(|_| BackendError::Timeout(deadline))

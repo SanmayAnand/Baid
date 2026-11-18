@@ -1,0 +1,14 @@
+# Redocly CLI config for `npx @redocly/cli lint api/openapi.yaml`.
+# Recommended rules, with two deliberate exceptions.
+extends:
+  - recommended
+
+rules:
+  # The only documented server is the local development default (`baid` listens on
+  # :7070). Deployments set their own URL; there is no public hosted endpoint to list.
+  no-server-example.com: off
+
+  # /healthz and /readyz are unauthenticated probes with no client errors to report.
+  # Every /v1 operation documents 400 and 401, and crates/server/tests/contract.rs
+  # checks the 401 for every authenticated route, so this rule adds nothing there.
+  operation-4xx-response: off
