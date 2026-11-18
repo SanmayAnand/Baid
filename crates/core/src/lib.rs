@@ -28,7 +28,7 @@ pub use item::{
     Priority, PutOutcome, WriteSeq,
 };
 pub use key::{normalise, Key, KEY_PREFIX, SCHEMA_VERSION};
-pub use memory::MemoryBackend;
+pub use memory::{text_score, MemoryBackend};
 pub use predict::{
     Candidate, PredictionSource, QueryClass, RecallRecord, ScoredClass, SessionView, TenantStats,
 };

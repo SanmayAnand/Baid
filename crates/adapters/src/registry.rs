@@ -3,7 +3,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use baid_core::{AdapterKind, Backend, Config, MemoryBackend, TenantId};
+use baid_core::{AdapterKind, Backend, BackendError, Config, MemoryBackend, TenantId};
+
+use crate::bolt::{BoltBackend, BoltConfig};
+use crate::resilient::Resilient;
+use crate::s3::{S3Backend, S3Config};
+
+/// Memories an unfiltered S3 search scans (newest first).
+pub const S3_SCAN_LIMIT: usize = 1_000;
 
 /// A tenant's adapter could not be built.
 #[derive(Debug, thiserror::Error)]
@@ -16,6 +23,32 @@ pub enum BuildError {
         /// The requested kind.
         kind: AdapterKind,
     },
+    /// The adapter refused its settings (for example a malformed URL).
+    #[error("tenant {tenant}: {source}")]
+    Invalid {
+        /// The tenant.
+        tenant: TenantId,
+        /// Why.
+        source: BackendError,
+    },
+}
+
+/// Backend credentials, already read from the environment.
+#[derive(Clone, Default)]
+pub struct Credentials {
+    /// User name, if the backend needs one.
+    pub user: Option<String>,
+    /// Password, if the backend needs one.
+    pub password: Option<String>,
+}
+
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credentials")
+            .field("user", &self.user.as_ref().map(|_| "***"))
+            .field("password", &self.password.as_ref().map(|_| "***"))
+            .finish()
+    }
 }
 
 /// Tenant → backend.
@@ -30,12 +63,51 @@ impl Registry {
         Self::default()
     }
 
-    /// Builds one backend per configured tenant.
-    pub fn from_config(config: &Config) -> Result<Self, BuildError> {
+    /// Builds one backend per configured tenant, each wrapped with retries and a circuit
+    /// breaker. `credentials` supplies each tenant's resolved secrets. Connections are lazy,
+    /// so this succeeds even when a backend is down.
+    pub async fn from_config(
+        config: &Config,
+        credentials: impl Fn(&TenantId) -> Credentials,
+    ) -> Result<Self, BuildError> {
         let mut r = Registry::new();
         for t in &config.tenants {
+            let deadline = t.backend_timeout.get();
             let backend: Arc<dyn Backend> = match t.adapter {
-                AdapterKind::Memory => Arc::new(MemoryBackend::new()),
+                AdapterKind::Memory => {
+                    Arc::new(Resilient::with_defaults(MemoryBackend::new(), deadline))
+                }
+                AdapterKind::Bolt => {
+                    let creds = credentials(&t.id);
+                    let bolt = BoltBackend::connect(BoltConfig {
+                        url: t.adapter_url.clone(),
+                        user: creds.user,
+                        password: creds.password,
+                        max_connections: 16,
+                        call_timeout: deadline,
+                    })
+                    .await
+                    .map_err(|source| BuildError::Invalid {
+                        tenant: t.id.clone(),
+                        source,
+                    })?;
+                    Arc::new(Resilient::with_defaults(bolt, deadline))
+                }
+                AdapterKind::S3 => {
+                    let creds = credentials(&t.id);
+                    let s3 = S3Backend::connect(S3Config {
+                        url: t.adapter_url.clone(),
+                        access_key: creds.user,
+                        secret_key: creds.password,
+                        call_timeout: deadline,
+                        scan_limit: S3_SCAN_LIMIT,
+                    })
+                    .map_err(|source| BuildError::Invalid {
+                        tenant: t.id.clone(),
+                        source,
+                    })?;
+                    Arc::new(Resilient::with_defaults(s3, deadline))
+                }
                 kind => {
                     return Err(BuildError::Unsupported {
                         tenant: t.id.clone(),
@@ -85,25 +157,53 @@ impl std::fmt::Debug for Registry {
 mod tests {
     use super::*;
 
-    fn config(adapter: &str) -> Config {
+    fn config(adapter: &str, url: &str) -> Config {
         toml::from_str(&format!(
-            "[[tenants]]\nid = \"acme\"\napi_key_env = \"K\"\nadapter = \"{adapter}\"\nadapter_url = \"x://\"\n"
+            "[[tenants]]\nid = \"acme\"\napi_key_env = \"K\"\nadapter = \"{adapter}\"\nadapter_url = \"{url}\"\n"
         ))
         .unwrap()
     }
 
-    #[test]
-    fn memory_tenants_get_a_backend() {
-        let r = Registry::from_config(&config("memory")).unwrap();
+    #[tokio::test]
+    async fn builds_memory_and_bolt_without_connecting() {
         let acme = TenantId::new("acme").unwrap();
+        let r = Registry::from_config(&config("memory", "memory://"), |_| Credentials::default())
+            .await
+            .unwrap();
         assert_eq!(r.get(&acme).unwrap().id().as_str(), "memory");
         assert!(r.get(&TenantId::new("other").unwrap()).is_none());
-        assert_eq!(format!("{r:?}"), "Registry(acme=memory)");
+
+        // Nothing listens on this port; the pool is lazy, so building still succeeds.
+        let r = Registry::from_config(&config("bolt", "bolt://127.0.0.1:1"), |_| {
+            Credentials::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!(format!("{r:?}"), "Registry(acme=bolt)");
+    }
+
+    #[tokio::test]
+    async fn bad_urls_and_unbuilt_adapters_fail_loudly() {
+        let e = Registry::from_config(&config("bolt", "http://x"), |_| Credentials::default())
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("bolt://"), "{e}");
+        let e = Registry::from_config(&config("s3", "http://b"), |_| Credentials::default())
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("s3://"), "{e}");
+        let e = Registry::from_config(&config("zep", "https://z"), |_| Credentials::default())
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("Zep"), "{e}");
     }
 
     #[test]
-    fn unbuilt_adapters_fail_loudly() {
-        let e = Registry::from_config(&config("bolt")).unwrap_err();
-        assert!(e.to_string().contains("Bolt"), "{e}");
+    fn credentials_never_print() {
+        let c = Credentials {
+            user: Some("neo4j".into()),
+            password: Some("hunter2".into()),
+        };
+        assert!(!format!("{c:?}").contains("hunter2"));
     }
 }

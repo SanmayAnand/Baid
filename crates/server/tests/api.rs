@@ -18,7 +18,7 @@ use tower::ServiceExt;
 const ACME: &str = "acme-key-0123456789";
 const GLOBEX: &str = "globex-key-0123456789";
 
-fn app() -> Router {
+async fn app() -> Router {
     let config: Config = toml::from_str(
         r#"
 [[tenants]]
@@ -37,7 +37,7 @@ adapter_url = "memory://"
     .unwrap();
     let env: HashMap<&str, &str> = [("K_ACME", ACME), ("K_GLOBEX", GLOBEX)].into();
     let secrets = resolve_secrets(&config, |k| env.get(k).map(|v| v.to_string())).unwrap();
-    public_router(State::build(config, secrets).unwrap())
+    public_router(State::build(config, secrets).await.unwrap())
 }
 
 async fn send(
@@ -104,7 +104,7 @@ fn texts(v: &Value) -> Vec<String> {
 
 #[tokio::test]
 async fn second_recall_is_a_hit() {
-    let app = app();
+    let app = app().await;
     remember(&app, ACME, "s1", "Acme renews in March", &["acme"]).await;
     let first = recall(&app, ACME, "s2", "acme renewal").await;
     assert_eq!(first["cache"], "miss");
@@ -117,7 +117,7 @@ async fn second_recall_is_a_hit() {
 
 #[tokio::test]
 async fn a_session_always_sees_its_own_write() {
-    let app = app();
+    let app = app().await;
     let before = recall(&app, ACME, "s1", "renewal dates").await; // caches an empty result
     assert!(texts(&before).is_empty());
     remember(&app, ACME, "s1", "renewal dates: acme in May", &["acme"]).await;
@@ -130,7 +130,7 @@ async fn a_session_always_sees_its_own_write() {
 /// that session sees it only after the entry expires or is reloaded.
 #[tokio::test]
 async fn other_sessions_may_miss_added_results_until_reload() {
-    let app = app();
+    let app = app().await;
     recall(&app, ACME, "reader", "renewal dates").await; // empty, cached
     remember(
         &app,
@@ -152,7 +152,7 @@ async fn other_sessions_may_miss_added_results_until_reload() {
 
 #[tokio::test]
 async fn a_write_to_a_cached_entity_invalidates_for_everyone() {
-    let app = app();
+    let app = app().await;
     remember(&app, ACME, "w1", "acme plan is gold", &["acme"]).await;
     recall(&app, ACME, "reader", "acme plan").await;
     assert_eq!(
@@ -170,7 +170,7 @@ async fn a_write_to_a_cached_entity_invalidates_for_everyone() {
 
 #[tokio::test]
 async fn tenants_never_see_each_other() {
-    let app = app();
+    let app = app().await;
     remember(&app, ACME, "s", "acme secret plan", &["acme"]).await;
     recall(&app, ACME, "s", "secret plan").await; // cached for acme
     let g = recall(&app, GLOBEX, "s", "secret plan").await;
@@ -183,7 +183,7 @@ async fn tenants_never_see_each_other() {
 
 #[tokio::test]
 async fn zero_staleness_skips_the_cache() {
-    let app = app();
+    let app = app().await;
     let body = json!({ "session_id": "s", "query": "q", "max_staleness_ms": 0 }).to_string();
     for _ in 0..2 {
         let (_, v) = send(&app, "POST", "/v1/recall", Some(ACME), &body).await;
@@ -193,7 +193,7 @@ async fn zero_staleness_skips_the_cache() {
 
 #[tokio::test]
 async fn budget_trims_the_context() {
-    let app = app();
+    let app = app().await;
     for i in 0..5 {
         let text = format!("acme note {i}: {}", "detail ".repeat(20));
         remember(&app, ACME, "s", &text, &["acme"]).await;
@@ -206,7 +206,7 @@ async fn budget_trims_the_context() {
 
 #[tokio::test]
 async fn idempotent_remember_is_applied_once() {
-    let app = app();
+    let app = app().await;
     let body = json!({ "session_id": "s", "text": "acme signed", "entities": ["acme"], "idempotency_key": "req-1" }).to_string();
     let (_, a) = send(&app, "POST", "/v1/remember", Some(ACME), &body).await;
     let (_, b) = send(&app, "POST", "/v1/remember", Some(ACME), &body).await;
@@ -221,7 +221,7 @@ async fn idempotent_remember_is_applied_once() {
 
 #[tokio::test]
 async fn bad_requests_get_clear_errors() {
-    let app = app();
+    let app = app().await;
     let cases = [
         (
             "/v1/recall",
@@ -261,7 +261,7 @@ async fn bad_requests_get_clear_errors() {
 
 #[tokio::test]
 async fn ending_a_session_is_idempotent() {
-    let app = app();
+    let app = app().await;
     recall(&app, ACME, "s9", "q").await;
     for _ in 0..2 {
         let (s, _) = send(&app, "DELETE", "/v1/sessions/s9", Some(ACME), "").await;

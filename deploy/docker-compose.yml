@@ -1,0 +1,107 @@
+# Local development stack: the backends BAiD sits in front of, plus metrics.
+#
+#   just up      start everything and wait until healthy
+#   just down    stop (data volumes are kept)
+#
+# BAiD itself runs on the host (`cargo run -p server -- -c baid.toml`), so Prometheus scrapes
+# it through host.docker.internal.
+#
+# Every port is bound to 127.0.0.1: these services use development credentials and must not
+# be reachable from the network. Override the credentials in deploy/.env (see .env.example).
+
+name: baid
+
+services:
+  neo4j:
+    image: neo4j:5.26-community
+    environment:
+      NEO4J_AUTH: "neo4j/${NEO4J_PASSWORD:-baid-dev-password}"
+      NEO4J_server_memory_heap_max__size: "1G"
+      NEO4J_server_memory_pagecache_size: "512M"
+    ports:
+      - "127.0.0.1:7474:7474" # browser UI
+      - "127.0.0.1:7687:7687" # Bolt
+    volumes:
+      - neo4j-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  # S3-compatible object store (replaces MinIO, whose images are no longer published).
+  # One container runs SeaweedFS's master, volume server, filer and S3 gateway.
+  seaweedfs:
+    image: chrislusf/seaweedfs:${SEAWEEDFS_TAG:-3.97}
+    command:
+      - "server"
+      - "-dir=/data"
+      # Listen on every container interface (the default is only the container IP), so the
+      # healthcheck can reach it on localhost. The host port mapping is still 127.0.0.1-only.
+      - "-ip.bind=0.0.0.0"
+      - "-s3"
+      - "-s3.port=8333"
+      - "-s3.config=/etc/seaweedfs/s3.json"
+    ports:
+      - "127.0.0.1:8333:8333" # S3 API
+    volumes:
+      - ./seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro
+      - seaweedfs-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8333 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:${PROMETHEUS_TAG:-v3.5.0}
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # Linux; Docker Desktop provides it already
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    environment:
+      GF_SECURITY_ADMIN_USER: "admin"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-baid-dev-password}"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/api/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+volumes:
+  neo4j-data:
+  seaweedfs-data:
+  prometheus-data:
+  grafana-data:

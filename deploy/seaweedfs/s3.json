@@ -1,0 +1,14 @@
+{
+  "identities": [
+    {
+      "name": "baid",
+      "credentials": [
+        {
+          "accessKey": "baid",
+          "secretKey": "baid-dev-password"
+        }
+      ],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}

@@ -1,0 +1,418 @@
+openapi: 3.1.0
+info:
+  title: BAiD HTTP API
+  version: 1.0.0
+  summary: Memory accelerator for AI agents.
+  description: |
+    BAiD sits between an agent and its memory backend. Agents call two operations:
+    `recall` (what do I already know about this?) and `remember` (store a durable fact).
+
+    **Authentication.** Every `/v1` call needs `Authorization: Bearer <api key>`. The key
+    alone decides the tenant; there is no tenant field anywhere in a request.
+
+    **Errors.** Every error response has the same body (`Error`). Retry only when
+    `error.retryable` is true, with jittered backoff.
+
+    **Consistency.**
+    - A session always sees its own writes.
+    - No session is served cached data that a write changed: a write invalidates every
+      cached result that names or returns an entity it touched.
+    - A write can also *add* a result to a search another session already cached; other
+      sessions see such additions within the tenant's TTL (default 5 minutes), the same
+      bound as writes made outside BAiD.
+
+    **Versioning.** This is API v1. It changes only additively; a breaking change means
+    `/v2`. Clients must ignore unknown response fields and handle unknown `cache` values.
+
+    The admin API (health probes, later metrics and flush) listens on a separate port,
+    default `127.0.0.1:7071`, and is not described here.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+servers:
+  - url: http://localhost:7070
+    description: Local development
+
+security:
+  - bearerAuth: []
+
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      summary: Liveness probe.
+      security: []
+      responses:
+        "200":
+          description: The process is up.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+
+  /readyz:
+    get:
+      operationId: readyz
+      summary: Readiness probe; 503 while shutting down.
+      security: []
+      responses:
+        "200":
+          description: Ready for traffic.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "503":
+          description: Draining; send traffic elsewhere.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+
+  /v1/whoami:
+    get:
+      operationId: whoami
+      summary: Which tenant the API key belongs to.
+      responses:
+        "200":
+          description: The caller's tenant.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tenant]
+                properties:
+                  tenant:
+                    $ref: "#/components/schemas/TenantId"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/recall:
+    post:
+      operationId: recall
+      summary: Look up what is already known about a topic.
+      description: |
+        Served from the cache when possible, otherwise from the backend (and then cached).
+        The result is trimmed to `token_budget` in a stable order.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecallRequest"
+            example:
+              session_id: "agent-run-42"
+              query: "When does Acme renew?"
+              token_budget: 1000
+              entity_ids: ["acme"]
+              max_staleness_ms: 60000
+      responses:
+        "200":
+          description: Packed context.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecallResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/Internal"
+        "502":
+          $ref: "#/components/responses/BackendError"
+        "503":
+          $ref: "#/components/responses/BackendUnavailable"
+
+  /v1/remember:
+    post:
+      operationId: remember
+      summary: Store a durable fact.
+      description: |
+        Forwarded to the backend. Returns after the backend has acknowledged it, at which
+        point every cached result depending on its entities is invalidated. Send an
+        `idempotency_key` to make retries safe: a repeated key returns the first answer
+        (with `replayed: true`) instead of writing twice. Keys are kept for 24 hours.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RememberRequest"
+            example:
+              session_id: "agent-run-42"
+              text: "Acme renews on 1 March 2027."
+              entities: ["acme"]
+              labels: ["contract"]
+              as_of: "2026-11-17T10:00:00Z"
+              idempotency_key: "agent-run-42/step-7"
+      responses:
+        "200":
+          description: Stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RememberResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/Internal"
+        "502":
+          $ref: "#/components/responses/BackendError"
+        "503":
+          $ref: "#/components/responses/BackendUnavailable"
+
+  /v1/sessions/{session_id}:
+    delete:
+      operationId: endSession
+      summary: Forget a session. Idempotent.
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/SessionId"
+      responses:
+        "204":
+          description: The session is gone (or never existed).
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: The tenant's API key.
+
+  responses:
+    BadRequest:
+      description: "Malformed request (`invalid_argument`) or budget below 64 (`budget_too_small`)."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: "Missing, malformed or unknown API key (`unauthorized`)."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RateLimited:
+      description: "Over the tenant's request rate (`rate_limited`). Retryable."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Internal:
+      description: "Unexpected internal failure (`internal`). Retryable."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    BackendError:
+      description: "The backend rejected the request (`backend_error`). Not retryable."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    BackendUnavailable:
+      description: "The backend timed out, is down, or its circuit is open (`backend_unavailable`). Retryable."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    TenantId:
+      type: string
+      minLength: 1
+      maxLength: 64
+      pattern: "^[A-Za-z0-9_-]+$"
+
+    SessionId:
+      type: string
+      description: Chosen by the client; one per agent run or conversation. No control characters.
+      minLength: 1
+      maxLength: 128
+
+    EntityId:
+      type: string
+      description: A domain entity such as a customer or project. No control characters.
+      minLength: 1
+      maxLength: 512
+
+    Status:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, ready, draining]
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, retryable]
+          properties:
+            code:
+              type: string
+              enum:
+                - unauthorized
+                - invalid_argument
+                - budget_too_small
+                - backend_unavailable
+                - backend_error
+                - rate_limited
+                - not_found
+                - internal
+            message:
+              type: string
+              description: Human-readable. Never contains internal details.
+            retryable:
+              type: boolean
+
+    RecallRequest:
+      type: object
+      additionalProperties: false
+      required: [session_id, query]
+      properties:
+        session_id:
+          $ref: "#/components/schemas/SessionId"
+        query:
+          type: string
+          description: The question, in natural language. Must not be empty after trimming.
+          minLength: 1
+          maxLength: 4096
+        token_budget:
+          type: integer
+          minimum: 64
+          maximum: 32000
+          default: 2000
+          description: Most tokens of context to return. Below 64 is `budget_too_small`.
+        entity_ids:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/EntityId"
+          description: Only items mentioning at least one of these entities.
+        labels:
+          type: array
+          items:
+            type: string
+          description: Only items carrying at least one of these labels.
+        since:
+          type: string
+          format: date-time
+          description: Only items recorded at or after this time (RFC 3339).
+        max_staleness_ms:
+          type: integer
+          minimum: 0
+          description: Oldest cached answer accepted. 0 always goes to the backend.
+
+    RecallResponse:
+      type: object
+      required: [items, tokens, dropped, cache]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/MemoryItem"
+          description: In the order the agent should read them.
+        tokens:
+          type: integer
+          minimum: 0
+          description: Tokens used by `items`.
+        dropped:
+          type: integer
+          minimum: 0
+          description: Items left out as duplicates or to fit the budget.
+        cache:
+          type: string
+          enum: [hit, partial, miss]
+          description: Where the items came from. Clients must accept unknown values.
+
+    MemoryItem:
+      type: object
+      required: [id, text, score, tokens, entities, source]
+      properties:
+        id:
+          type: string
+          description: The backend's id for the item.
+        text:
+          type: string
+        score:
+          type: number
+          description: Backend relevance; higher is better.
+        tokens:
+          type: integer
+          minimum: 0
+        entities:
+          type: array
+          items:
+            $ref: "#/components/schemas/EntityId"
+        as_of:
+          type: [string, "null"]
+          format: date-time
+        source:
+          type: string
+          description: The adapter that produced the item, e.g. `bolt`.
+
+    RememberRequest:
+      type: object
+      additionalProperties: false
+      required: [session_id, text]
+      properties:
+        session_id:
+          $ref: "#/components/schemas/SessionId"
+        text:
+          type: string
+          minLength: 1
+          maxLength: 32768
+        entities:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/EntityId"
+          description: Entities the fact is about. Name them to make invalidation precise.
+        labels:
+          type: array
+          items:
+            type: string
+        as_of:
+          type: string
+          format: date-time
+          description: When the fact became true (RFC 3339).
+        idempotency_key:
+          type: string
+          minLength: 1
+          maxLength: 128
+
+    RememberResponse:
+      type: object
+      required: [id, entities, version, replayed]
+      properties:
+        id:
+          type: string
+          description: The backend's id for the stored fact.
+        entities:
+          type: array
+          items:
+            $ref: "#/components/schemas/EntityId"
+          description: Every entity the write touched (named by the client or linked by the backend).
+        version:
+          type: [integer, "null"]
+        replayed:
+          type: boolean
+          description: True if this answers an earlier request with the same idempotency key.

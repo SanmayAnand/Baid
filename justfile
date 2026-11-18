@@ -25,9 +25,28 @@ test:
 deny:
     cargo deny check
 
-# Start Neo4j, MinIO, Prometheus and Grafana
+compose := "docker compose -f deploy/docker-compose.yml"
+
+# Start Neo4j, SeaweedFS (S3), Prometheus and Grafana, and wait until all are healthy
 up:
-    @echo "not set up yet (see docs/build-plan.md)"
+    {{compose}} up -d --wait
+    {{compose}} exec -T seaweedfs sh -c "echo s3.bucket.create -name baid | weed shell -master=localhost:9333"
+
+# Stop the local stack (data volumes are kept)
+down:
+    {{compose}} down
+
+# Status of the local stack
+ps:
+    {{compose}} ps
+
+# Follow the local stack's logs (optionally one service: `just logs neo4j`)
+logs *service:
+    {{compose}} logs -f {{service}}
+
+# Integration tests against the local stack (needs `just up`)
+test-live $BAID_TEST_NEO4J_URL="bolt://127.0.0.1:7687" $BAID_TEST_NEO4J_PASSWORD="baid-dev-password" $BAID_TEST_S3_URL="s3://baid/contract?endpoint=http://127.0.0.1:8333":
+    cargo test -p adapters --test bolt_fresh_schema --test bolt_live --test contract -- --test-threads=4
 
 # Load a synthetic dataset into the local stack
 load:
@@ -37,6 +56,6 @@ load:
 bench:
     @echo "not set up yet (see docs/build-plan.md)"
 
-# memharness small run (referenced by CLAUDE.md)
+# memharness small run
 bench-small:
     @echo "not set up yet (see docs/build-plan.md)"

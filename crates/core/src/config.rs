@@ -85,7 +85,7 @@ pub struct TelemetryConfig {
 pub enum AdapterKind {
     /// Neo4j or Memgraph over Bolt.
     Bolt,
-    /// S3 or any S3-compatible object store (MinIO).
+    /// S3 or any S3-compatible object store (SeaweedFS, MinIO, Ceph).
     S3,
     /// Zep (after launch).
     Zep,

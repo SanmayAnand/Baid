@@ -14,6 +14,18 @@ use crate::auth::Tenant;
 use crate::state::AppState;
 use error::ApiError;
 
+/// Every `(method, path)` the public router serves, in `api/openapi.yaml` notation. Keep it
+/// in step with [`public_router`]. `tests/contract.rs` checks that it equals the spec's
+/// routes and that the router answers each one with a documented status.
+pub const ROUTES: &[(&str, &str)] = &[
+    ("GET", "/healthz"),
+    ("GET", "/readyz"),
+    ("GET", "/v1/whoami"),
+    ("POST", "/v1/recall"),
+    ("POST", "/v1/remember"),
+    ("DELETE", "/v1/sessions/{session_id}"),
+];
+
 /// Public API: health probes (no auth) and `/v1/*` (API key required).
 pub fn public_router(state: AppState) -> Router {
     Router::new()
@@ -22,7 +34,7 @@ pub fn public_router(state: AppState) -> Router {
         .route("/v1/whoami", get(whoami))
         .route("/v1/recall", post(api::recall))
         .route("/v1/remember", post(api::remember))
-        .route("/v1/sessions/{id}", delete(api::end_session))
+        .route("/v1/sessions/{session_id}", delete(api::end_session))
         .fallback(not_found)
         .layer(TraceLayer::new_for_http())
         .with_state(state)

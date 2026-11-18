@@ -7,6 +7,13 @@ all-features = true
 # Defaults: known vulnerabilities and unsound crates fail the check.
 ignore = [
     { id = "RUSTSEC-2024-0436", reason = "paste: archived proc-macro pulled in via foyer; compile-time only, no known vulnerability. Revisit on foyer upgrades." },
+    { id = "RUSTSEC-2025-0012", reason = "backoff: unmaintained, transitive via neo4rs 0.8, no known vulnerability. Remove when moving to neo4rs 0.9 stable." },
+    { id = "RUSTSEC-2024-0384", reason = "instant: unmaintained, transitive via neo4rs 0.8, no known vulnerability. Remove when moving to neo4rs 0.9 stable." },
+    { id = "RUSTSEC-2026-0543", reason = "chrono: unmaintained, transitive via neo4rs 0.8, no known vulnerability. Remove when moving to neo4rs 0.9 stable." },
+    { id = "RUSTSEC-2026-0555", reason = "chrono-tz: unmaintained, transitive via neo4rs 0.8, no known vulnerability. Remove when moving to neo4rs 0.9 stable." },
+    { id = "RUSTSEC-2026-0559", reason = "chrono-tz-build: unmaintained, transitive via neo4rs 0.8, no known vulnerability. Remove when moving to neo4rs 0.9 stable." },
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile: unmaintained, transitive via neo4rs 0.8, no known vulnerability. Remove when moving to neo4rs 0.9 stable." },
+    { id = "RUSTSEC-2026-0542", reason = "humantime: unmaintained, transitive via object_store 0.14 (non-optional dependency), no known vulnerability. Remove when object_store drops it." },
 ]
 
 [licenses]
@@ -21,6 +28,18 @@ allow = [
     "Zlib",
 ]
 confidence-threshold = 0.8
+
+# webpki-roots ships Mozilla's CA certificate list under CDLA-Permissive-2.0 (both 0.26.x and
+# 1.0.x, transitive via neo4rs 0.8). Allowed for that crate only, not globally.
+[[licenses.exceptions]]
+crate = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
+
+# webpki-root-certs is the same Mozilla CA list in certificate form, pulled in by object_store
+# 0.14 through reqwest and rustls-platform-verifier. Allowed for that crate only.
+[[licenses.exceptions]]
+crate = "webpki-root-certs"
+allow = ["CDLA-Permissive-2.0"]
 
 [licenses.private]
 # Workspace crates are publish = false; their own licence is Apache-2.0.

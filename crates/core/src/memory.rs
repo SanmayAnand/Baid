@@ -19,10 +19,18 @@ use crate::key::normalise;
 use crate::traits::Backend;
 use crate::types::{AdapterId, BackendQuery, EntityId, NodeId, TenantId};
 
+/// A stored memory: the item plus what search filters on but items do not carry.
+#[derive(Clone)]
+struct Entry {
+    item: MemoryItem,
+    labels: Vec<String>,
+}
+
 /// An in-process backend. Every tenant's items are kept apart.
 pub struct MemoryBackend {
     id: AdapterId,
-    items: Mutex<HashMap<TenantId, Vec<MemoryItem>>>,
+    items: Mutex<HashMap<TenantId, Vec<Entry>>>,
+    idempotency: Mutex<HashMap<(TenantId, String), WriteAck>>,
     next_node: AtomicU64,
 }
 
@@ -43,11 +51,12 @@ impl MemoryBackend {
         MemoryBackend {
             id: AdapterId::new(id).unwrap_or_else(|_| unreachable!("caller passes a valid id")),
             items: Mutex::new(HashMap::new()),
+            idempotency: Mutex::new(HashMap::new()),
             next_node: AtomicU64::new(1),
         }
     }
 
-    fn lock(&self) -> MutexGuard<'_, HashMap<TenantId, Vec<MemoryItem>>> {
+    fn lock(&self) -> MutexGuard<'_, HashMap<TenantId, Vec<Entry>>> {
         self.items.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -71,7 +80,10 @@ impl MemoryBackend {
             as_of: None,
             source: self.id.clone(),
         };
-        self.lock().entry(tenant.clone()).or_default().push(item);
+        self.lock().entry(tenant.clone()).or_default().push(Entry {
+            item,
+            labels: Vec::new(),
+        });
         id
     }
 
@@ -82,8 +94,20 @@ impl MemoryBackend {
         queries.iter().map(|q| run(items, q)).collect()
     }
 
-    /// Stores a fact synchronously.
+    /// Stores a fact synchronously. A repeated idempotency key returns the first write's
+    /// acknowledgement without storing again.
     pub fn write_now(&self, tenant: &TenantId, fact: &Fact) -> WriteAck {
+        let key = fact
+            .idempotency_key
+            .as_ref()
+            .map(|k| (tenant.clone(), k.clone()));
+        let mut seen = self
+            .idempotency
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(ack) = key.as_ref().and_then(|k| seen.get(k)) {
+            return ack.clone();
+        }
         let node = self.new_node_id();
         let item = MemoryItem {
             id: node.clone(),
@@ -94,30 +118,87 @@ impl MemoryBackend {
             as_of: fact.as_of,
             source: self.id.clone(),
         };
-        self.lock().entry(tenant.clone()).or_default().push(item);
-        WriteAck {
+        self.lock().entry(tenant.clone()).or_default().push(Entry {
+            item,
+            labels: fact.labels.clone(),
+        });
+        let ack = WriteAck {
             node,
             entities: fact.entities.clone(),
             version: Some(1),
+        };
+        if let Some(k) = key {
+            seen.insert(k, ack.clone());
         }
+        ack
     }
+}
+
+/// Word-overlap relevance used by the in-process and object-store backends, which have no
+/// search engine: the fraction of the query's normalised words that occur in the normalised
+/// text. `None` when no word matches.
+pub fn text_score(query: &str, text: &str) -> Option<f32> {
+    let query = normalise(query);
+    let words: Vec<&str> = query.split(' ').filter(|w| !w.is_empty()).collect();
+    if words.is_empty() {
+        return None;
+    }
+    let text = normalise(text);
+    let hits = words.iter().filter(|w| text.contains(**w)).count();
+    (hits > 0).then(|| hits as f32 / words.len() as f32)
+}
+
+/// Memories mentioning `entity` (score 1.0), plus at `hops >= 2` memories mentioning an
+/// entity co-mentioned with it (score 0.5). Newest first within a score.
+fn neighbourhood(entries: &[Entry], entity: &EntityId, hops: u8, limit: usize) -> Vec<MemoryItem> {
+    let scored = |i: &MemoryItem, score: f32| {
+        let mut i = i.clone();
+        i.score = score;
+        i
+    };
+    let mut out: Vec<MemoryItem> = entries
+        .iter()
+        .rev()
+        .map(|e| &e.item)
+        .filter(|i| mentions(i, entity))
+        .map(|i| scored(i, 1.0))
+        .collect();
+    if hops >= 2 {
+        let next: Vec<EntityId> = out
+            .iter()
+            .flat_map(|i| i.entities.iter().cloned())
+            .filter(|e| e != entity)
+            .collect();
+        let second: Vec<MemoryItem> = entries
+            .iter()
+            .rev()
+            .map(|e| &e.item)
+            .filter(|i| !mentions(i, entity) && next.iter().any(|e| mentions(i, e)))
+            .map(|i| scored(i, 0.5))
+            .collect();
+        out.extend(second);
+    }
+    out.truncate(limit);
+    out
 }
 
 fn mentions(i: &MemoryItem, e: &EntityId) -> bool {
     i.entities.iter().any(|x| x == e)
 }
 
-fn run(items: &[MemoryItem], q: &BackendQuery) -> BackendResult {
+fn run(entries: &[Entry], q: &BackendQuery) -> BackendResult {
     let mut hits: Vec<MemoryItem> = match q {
         BackendQuery::Search {
             text,
             filters,
             limit,
         } => {
-            let norm = normalise(text);
-            let words: Vec<&str> = norm.split(' ').filter(|w| !w.is_empty()).collect();
-            let mut scored: Vec<MemoryItem> = items
+            let mut scored: Vec<MemoryItem> = entries
                 .iter()
+                .filter(|e| {
+                    filters.labels.is_empty() || e.labels.iter().any(|l| filters.labels.contains(l))
+                })
+                .map(|e| &e.item)
                 .filter(|i| {
                     filters.entity_ids.is_empty()
                         || filters.entity_ids.iter().any(|e| mentions(i, e))
@@ -128,11 +209,9 @@ fn run(items: &[MemoryItem], q: &BackendQuery) -> BackendResult {
                     (None, _) => true,
                 })
                 .filter_map(|i| {
-                    let text = normalise(&i.text);
-                    let n = words.iter().filter(|w| text.contains(**w)).count();
-                    (n > 0).then(|| {
+                    text_score(text, &i.text).map(|score| {
                         let mut i = i.clone();
-                        i.score = n as f32 / words.len().max(1) as f32;
+                        i.score = score;
                         i
                     })
                 })
@@ -141,18 +220,12 @@ fn run(items: &[MemoryItem], q: &BackendQuery) -> BackendResult {
             scored.truncate(usize::from(*limit));
             scored
         }
-        BackendQuery::Neighbourhood { entity, limit, .. } => items
-            .iter()
-            .filter(|i| mentions(i, entity))
-            .take(usize::from(*limit))
-            .cloned()
-            .collect(),
-        BackendQuery::Entity { id } => items
-            .iter()
-            .filter(|i| mentions(i, id))
-            .take(1)
-            .cloned()
-            .collect(),
+        BackendQuery::Neighbourhood {
+            entity,
+            hops,
+            limit,
+        } => neighbourhood(entries, entity, *hops, usize::from(*limit)),
+        BackendQuery::Entity { id } => neighbourhood(entries, id, 1, 1),
     };
     for i in &mut hits {
         if i.score == 0.0 {

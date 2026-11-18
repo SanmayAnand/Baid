@@ -71,11 +71,31 @@ merge `main` into a branch. After a rebase, push with `git push --force-with-lea
 
 ## Claude Code
 
-Claude Code prepares changes locally; a human pushes. It never pushes, never opens or merges
-pull requests, and never forces anything. [CLAUDE.md](CLAUDE.md) states the rules and
-[.claude/settings.json](.claude/settings.json) blocks those commands at the tool level. Read
-Claude's session report and the diff before you push. Personal overrides go in
-`CLAUDE.local.md` or `.claude/settings.local.json`, which are not committed.
+Claude Code prepares changes locally; a human reviews the diff, commits and pushes. Claude
+never pushes, never opens or merges pull requests, and never forces anything. Its working
+notes live in `.notes/`, which is not committed; decisions that affect the code are recorded
+in `docs/build-plan.md` (the gaps table) or as an ADR.
+
+## Adding a backend adapter
+
+1. Implement `baid_core::Backend` in a new module of `crates/adapters` (see `bolt.rs` and
+   `s3.rs`). Every call takes the tenant: scope every read and write by it.
+2. Map every driver error onto `BackendError`. Network and transient server errors are
+   `Unavailable` or `Timeout` (retryable). Auth failures and bad requests are `Rejected`.
+3. **Switch off the driver's own retries** and bound each call with a timeout.
+   `adapters::Resilient` is the only retry layer, and a hidden retry loop hides failures from
+   its circuit breaker (both neo4rs and object_store retry by default).
+4. Never put client text (entity names, idempotency keys, queries) into keys, paths or query
+   syntax unescaped. Hash it or pass it as a parameter.
+5. Add the kind to `AdapterKind` and build it in `Registry::from_config`, wrapped in
+   `Resilient`.
+6. Add the adapter to `subjects()` in `crates/adapters/tests/contract.rs`, gated on an
+   environment variable if it needs a live service, and to `just test-live` and
+   `.github/workflows/contract.yml`.
+
+**Definition of done: the adapter passes `tests/contract.rs`.** It checks fields round-trip,
+tenant isolation, filters, neighbourhoods, newest-first entity lookups, idempotent writes,
+batch ordering, and odd text and entity names.
 
 ## Architecture decisions
 
