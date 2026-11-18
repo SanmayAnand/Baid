@@ -40,7 +40,7 @@ jobs:
           BAID_TEST_NEO4J_URL: bolt://127.0.0.1:7687
           BAID_TEST_NEO4J_PASSWORD: baid-dev-password
           BAID_TEST_S3_URL: s3://baid/contract?endpoint=http://127.0.0.1:8333
-        run: cargo test -p adapters --test bolt_live --test contract -- --test-threads=4
+        run: cargo test -p adapters --test bolt_fresh_schema --test bolt_live --test contract -- --test-threads=4
 
       - name: Service logs
         if: failure()

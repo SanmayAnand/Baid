@@ -25,10 +25,19 @@
 //!   retried write is applied once), then `MERGE` the entities and `MENTIONS` edges.
 //!
 //! The schema (constraints and indexes) is created on first use with `IF NOT EXISTS`.
+//!
+//! # Transient errors
+//!
+//! Concurrent schema creation on a fresh database, and concurrent `MERGE`s of the same
+//! entities, can deadlock inside Neo4j. Neo4j aborts one transaction with
+//! `Neo.TransientError.Transaction.DeadlockDetected`, rolled back and safe to retry. The
+//! adapter retries such transactions itself (a few times, jittered, within the call
+//! timeout), as Neo4j's official drivers do.
 
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use baid_core::{
@@ -40,6 +49,14 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use tokio::sync::OnceCell;
 use tracing::debug;
+
+/// Attempts per call for errors Neo4j marks transient (see `retry_transient`).
+const TRANSIENT_ATTEMPTS: u32 = 5;
+
+/// `Neo.TransientError.*`: Neo4j rolled the transaction back and says it may be retried.
+fn is_transient(e: &neo4rs::Error) -> bool {
+    matches!(e, neo4rs::Error::Neo4j(n) if n.kind() == Neo4jErrorKind::Transient)
+}
 
 /// Statements that create the schema. Idempotent.
 const SCHEMA: &[&str] = &[
@@ -109,6 +126,7 @@ pub struct BoltBackend {
     graph: Arc<Graph>,
     schema: OnceCell<()>,
     call_timeout: Duration,
+    jitter: AtomicU64,
 }
 
 /// Connection settings for [`BoltBackend`].
@@ -151,6 +169,11 @@ impl BoltBackend {
             graph: Arc::new(graph),
             schema: OnceCell::new(),
             call_timeout: cfg.call_timeout,
+            jitter: AtomicU64::new(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(1, |d| d.as_nanos() as u64),
+            ),
         })
     }
 
@@ -164,32 +187,77 @@ impl BoltBackend {
             .map_err(|_| BackendError::Timeout(self.call_timeout))?
     }
 
-    /// Runs `q` in an explicit transaction, bounded by the call timeout, and returns every
-    /// row. Explicit transactions are not retried by the driver (unlike `Graph::execute`,
-    /// which retries even authentication failures for up to 60 s), so errors come back at
-    /// once and [`crate::Resilient`] is the only retry layer, with correct classification.
-    async fn tx_rows(&self, q: Query) -> Result<Vec<neo4rs::Row>, BackendError> {
+    /// One attempt: `q` in an explicit transaction, every row returned. Explicit
+    /// transactions are not retried by the driver (unlike `Graph::execute`, which retries
+    /// even authentication failures for up to 60 s).
+    async fn raw_rows(&self, q: Query) -> Result<Vec<neo4rs::Row>, neo4rs::Error> {
+        let mut txn = self.graph.start_txn().await?;
+        let mut stream = txn.execute(q).await?;
+        let mut rows = Vec::new();
+        while let Some(row) = stream.next(txn.handle()).await? {
+            rows.push(row);
+        }
+        txn.commit().await?;
+        Ok(rows)
+    }
+
+    /// One attempt of a statement whose rows are not needed.
+    async fn raw_run(&self, q: Query) -> Result<(), neo4rs::Error> {
+        let mut txn = self.graph.start_txn().await?;
+        txn.run(q).await?;
+        txn.commit().await
+    }
+
+    /// Runs `attempt` under the call timeout, retrying the whole transaction when Neo4j
+    /// reports a *transient* error (`Neo.TransientError.*`: deadlock, leader switch, lock
+    /// timeout). For those Neo4j has rolled the transaction back and declares it safe to
+    /// retry, so this is safe even for writes without an idempotency key, which
+    /// [`crate::Resilient`] cannot know. Connection and authentication failures are not
+    /// retried here; they stay with `Resilient`.
+    async fn retry_transient<T, F, Fut>(&self, mut attempt: F) -> Result<T, BackendError>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T, neo4rs::Error>>,
+    {
         self.bounded(async {
-            let mut txn = self.graph.start_txn().await.map_err(map_err)?;
-            let mut stream = txn.execute(q).await.map_err(map_err)?;
-            let mut rows = Vec::new();
-            while let Some(row) = stream.next(txn.handle()).await.map_err(map_err)? {
-                rows.push(row);
+            let mut n = 0u32;
+            loop {
+                match attempt().await {
+                    Err(e) if is_transient(&e) && n + 1 < TRANSIENT_ATTEMPTS => {
+                        n += 1;
+                        debug!(attempt = n, error = %e, "transient Neo4j error; retrying the transaction");
+                        tokio::time::sleep(self.transient_backoff(n)).await;
+                    }
+                    r => return r.map_err(map_err),
+                }
             }
-            txn.commit().await.map_err(map_err)?;
-            Ok(rows)
         })
         .await
     }
 
+    /// 10 ms doubling per attempt (at most 160 ms), times a jitter factor in [0.5, 1.5), so
+    /// transactions that deadlocked together do not retry in lockstep.
+    fn transient_backoff(&self, attempt: u32) -> Duration {
+        let base = Duration::from_millis(10 << attempt.min(4));
+        let mut x = self
+            .jitter
+            .fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed)
+            | 1;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        base.mul_f64(0.5 + (x % 1_000) as f64 / 1_000.0)
+    }
+
+    /// `q` in an explicit transaction, retried on transient errors, bounded by the call
+    /// timeout. Every row is returned.
+    async fn tx_rows(&self, q: Query) -> Result<Vec<neo4rs::Row>, BackendError> {
+        self.retry_transient(|| self.raw_rows(q.clone())).await
+    }
+
     /// Like [`Self::tx_rows`] for statements whose rows are not needed.
     async fn tx_run(&self, q: Query) -> Result<(), BackendError> {
-        self.bounded(async {
-            let mut txn = self.graph.start_txn().await.map_err(map_err)?;
-            txn.run(q).await.map_err(map_err)?;
-            txn.commit().await.map_err(map_err)
-        })
-        .await
+        self.retry_transient(|| self.raw_run(q.clone())).await
     }
 
     async fn ensure_schema(&self) -> Result<(), BackendError> {

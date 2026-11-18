@@ -46,7 +46,7 @@ logs *service:
 
 # Integration tests against the local stack (needs `just up`)
 test-live $BAID_TEST_NEO4J_URL="bolt://127.0.0.1:7687" $BAID_TEST_NEO4J_PASSWORD="baid-dev-password" $BAID_TEST_S3_URL="s3://baid/contract?endpoint=http://127.0.0.1:8333":
-    cargo test -p adapters --test bolt_live --test contract -- --test-threads=4
+    cargo test -p adapters --test bolt_fresh_schema --test bolt_live --test contract -- --test-threads=4
 
 # Load a synthetic dataset into the local stack
 load:
