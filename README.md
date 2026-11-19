@@ -57,11 +57,24 @@ idle. BAiD uses that idle time:
 - **What the TTL bounds.** A write can also *add* a result to someone else's cached search
   (a new fact that now matches). Other sessions see such additions within the tenant's TTL,
   the same bound as writes made outside BAiD.
+- **Stale-if-error.** While the backend times out, is unavailable or its circuit breaker is
+  open, BAiD may answer from an entry that expired up to `stale_if_error` ago (default 30 s,
+  at most 120 s and at most the TTL). The response says `"cache": "stale"` and gives the
+  entry's age in `age_ms`. Only the TTL is relaxed: an entry a write invalidated is never
+  served, a session never gets one older than its own last write, and `max_staleness` still
+  applies (`0` never gets one). While the backend is failing, the two TTL bounds above become
+  TTL + `stale_if_error`.
 - **Speculation is bounded.** Prefetch spends a fixed per-tenant budget, gets a deadline equal
   to the session's think time, is cancelled the moment it stops being useful, and is the first
   thing cut under load. Wrong guesses are evicted first.
 - **Fail open.** Any internal error falls back to calling the backend directly. BAiD can make
-  an agent faster, never less available.
+  an agent faster, never less available. A cache, index or packer that keeps failing is
+  bypassed for a cooldown. If BAiD cannot record a write (so it could no longer tell which
+  cached results that write made stale), that tenant's cache is bypassed until it has been
+  flushed: slower, never wrong. `/readyz` says `degraded` (still 200) while a backend's breaker
+  is open or a tenant's cache is bypassed; the admin listener's `/readyz` says which tenants
+  and why. Panic messages are not logged unless `BAID_LOG_PANIC_MESSAGES=1`, because they can
+  contain request data.
 
 The principles, in priority order: never wrong, then fast; fail open; bounded speculation; the
 backend stays the source of truth; one contract per side; measure before claiming.
@@ -140,7 +153,7 @@ adapter_url = "bolt://neo4j:7687"
 adapter_user_env = "NEO4J_USER"
 adapter_password_env = "NEO4J_PASSWORD"
 ttl = "5m"              # hard upper bound on staleness
-stale_if_error = "30s"  # serve expired entries this long while the backend is failing
+stale_if_error = "30s"  # serve expired entries this long while the backend fails (max 120s)
 
 [tenants.prefetch]
 enabled = true
