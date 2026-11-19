@@ -20,12 +20,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use baid_core::{
-    Backend, BackendError, BackendQuery, CacheEntry, CacheOutcome, CacheStore, EntityId, Fact, Key,
-    LoadInfo, MemoryItem, NodeId, PackedContext, Packer, PutOutcome, RecallRequest, SessionId,
-    TenantId, WriteSeq,
+    Backend, BackendError, BackendQuery, CacheEntry, CacheOutcome, CacheStore, EntityId, Fact,
+    Invalidator, Key, LoadInfo, MemoryItem, NodeId, PackedContext, Packer, PutOutcome,
+    RecallRequest, SessionId, TenantId, WriteSeq,
 };
 use dashmap::DashMap;
 use exec::{Role, SingleFlight};
+use invalidate::EntityIndex;
 use session::Sessions;
 use tracing::{debug, error, warn};
 
@@ -41,6 +42,24 @@ pub struct Recall {
     pub packed: PackedContext,
     /// Hit or miss.
     pub outcome: CacheOutcome,
+}
+
+/// What one housekeeping pass cleaned up.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Housekeeping {
+    /// Idle sessions forgotten.
+    pub sessions_expired: usize,
+    /// Idempotency keys past their TTL.
+    pub idempotency_keys_expired: usize,
+    /// Index references to keys the cache no longer holds.
+    pub index_refs_pruned: usize,
+}
+
+impl Housekeeping {
+    /// True if nothing was cleaned up.
+    pub fn is_empty(&self) -> bool {
+        *self == Housekeeping::default()
+    }
 }
 
 /// What a remember returns.
@@ -110,6 +129,7 @@ type LoadResult = Result<Arc<Vec<MemoryItem>>, BackendError>;
 /// share it (see [`SingleFlight`]).
 struct Load {
     cache: Arc<dyn CacheStore>,
+    index: Arc<EntityIndex>,
     backend: Arc<dyn Backend>,
     tenant: TenantId,
     key: Key,
@@ -150,8 +170,11 @@ impl Load {
             },
             self.now,
         );
-        match self.cache.put(self.key, entry).await {
-            PutOutcome::Stored => {}
+        let deps = entry.entities.to_vec();
+        match self.cache.put(self.key.clone(), entry).await {
+            // Indexed after the put: an entry the put refused needs no eviction, and a write
+            // that lands in between is caught by the cache's own check on read.
+            PutOutcome::Stored => self.index.register(&self.key, &deps),
             other => debug!(tenant = %self.tenant, outcome = ?other, "result not cached"),
         }
         Ok(Arc::new(items))
@@ -166,6 +189,7 @@ pub struct Engine {
     sessions: Arc<Sessions>,
     idempotency: Idempotency,
     flights: SingleFlight<LoadResult>,
+    index: Arc<EntityIndex>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -185,6 +209,7 @@ impl Engine {
         packer: Arc<dyn Packer>,
         sessions: Arc<Sessions>,
     ) -> Self {
+        let index = Arc::new(EntityIndex::new(Arc::clone(&cache)));
         Engine {
             cache,
             backends,
@@ -192,6 +217,7 @@ impl Engine {
             sessions,
             idempotency: Idempotency::default(),
             flights: SingleFlight::new(),
+            index,
         }
     }
 
@@ -278,6 +304,7 @@ impl Engine {
     ) -> Load {
         Load {
             cache: Arc::clone(&self.cache),
+            index: Arc::clone(&self.index),
             backend: Arc::clone(backend),
             tenant: t.id.clone(),
             key: key.clone(),
@@ -329,6 +356,7 @@ impl Engine {
                 if !matches!(e, BackendError::Rejected(_)) {
                     let seq = self.cache.mark_written(&t.id, &fact.entities);
                     self.sessions.note_write(&t.id, session, seq, now);
+                    self.index.on_write(&t.id, &fact.entities).await;
                     warn!(tenant = %t.id, error = %e, "write failed; its entities are treated as written");
                 }
                 return Err(e.into());
@@ -341,6 +369,8 @@ impl Engine {
         entities.dedup();
         let seq = self.cache.mark_written(&t.id, &entities);
         self.sessions.note_write(&t.id, session, seq, now);
+        let evicted = self.index.on_write(&t.id, &entities).await;
+        debug!(tenant = %t.id, entities = evicted.entities, keys_evicted = evicted.keys_evicted, "write invalidated");
 
         let r = Remembered {
             node: ack.node,
@@ -360,10 +390,16 @@ impl Engine {
     }
 
     /// Periodic cleanup: idle sessions and old idempotency keys.
-    pub fn housekeeping(&self, now: Instant, session_idle: Duration) -> (usize, usize) {
-        (
-            self.sessions.expire_idle(now, session_idle),
-            self.idempotency.prune(now),
-        )
+    pub fn housekeeping(&self, now: Instant, session_idle: Duration) -> Housekeeping {
+        Housekeeping {
+            sessions_expired: self.sessions.expire_idle(now, session_idle),
+            idempotency_keys_expired: self.idempotency.prune(now),
+            index_refs_pruned: self.index.prune(),
+        }
+    }
+
+    /// The entity → key index (for inspection and tests).
+    pub fn index(&self) -> &EntityIndex {
+        &self.index
     }
 }

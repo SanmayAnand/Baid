@@ -1350,6 +1350,13 @@ dependencies = [
 [[package]]
 name = "invalidate"
 version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "baid-core",
+ "cache",
+ "dashmap",
+ "futures",
+]
 
 [[package]]
 name = "io-uring"
@@ -2550,7 +2557,9 @@ dependencies = [
  "exec",
  "figment",
  "futures",
+ "invalidate",
  "pack",
+ "proptest",
  "serde",
  "serde_json",
  "serde_norway",

@@ -37,7 +37,8 @@ pub const SESSION_IDLE: Duration = Duration::from_secs(30 * 60);
 /// How often housekeeping runs.
 pub const HOUSEKEEPING_EVERY: Duration = Duration::from_secs(60);
 
-/// Expires idle sessions and old idempotency keys every minute until `shutdown`.
+/// Expires idle sessions and old idempotency keys, and prunes the invalidation index,
+/// every minute until `shutdown`.
 pub async fn housekeeping(state: AppState, shutdown: CancellationToken) {
     let mut tick = tokio::time::interval(HOUSEKEEPING_EVERY);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -45,9 +46,14 @@ pub async fn housekeeping(state: AppState, shutdown: CancellationToken) {
         tokio::select! {
             _ = shutdown.cancelled() => return,
             _ = tick.tick() => {
-                let (sessions, keys) = state.engine.housekeeping(Instant::now(), SESSION_IDLE);
-                if sessions + keys > 0 {
-                    debug!(sessions, idempotency_keys = keys, "housekeeping");
+                let done = state.engine.housekeeping(Instant::now(), SESSION_IDLE);
+                if !done.is_empty() {
+                    debug!(
+                        sessions = done.sessions_expired,
+                        idempotency_keys = done.idempotency_keys_expired,
+                        index_refs = done.index_refs_pruned,
+                        "housekeeping"
+                    );
                 }
             }
         }
