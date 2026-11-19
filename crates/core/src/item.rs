@@ -232,12 +232,13 @@ pub struct PackedContext {
     pub dropped: u32,
 }
 
-/// What a write invalidated.
+/// What [`crate::Invalidator::on_write`] did. (Stamping the entities as written is
+/// [`crate::CacheStore::mark_written`]'s job, done before.)
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InvalidationReport {
-    /// Entity versions bumped.
-    pub versions_bumped: usize,
-    /// Cache keys evicted.
+    /// Distinct entities whose dependent keys were looked up.
+    pub entities: usize,
+    /// Cache keys removed from the cache.
     pub keys_evicted: usize,
 }
 
