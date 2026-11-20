@@ -99,7 +99,7 @@ xtask/          repository checks (crate layering, cancellation of spawned tasks
 api/            OpenAPI contract for the HTTP API (planned)
 python/         Python SDK (planned)
 deploy/         docker-compose, Helm charts, Grafana dashboards (planned)
-bench/          benchmark traces and published reports (planned)
+bench/          benchmark datasets (manifests), traces and published reports
 docs/adr/       architecture decision records
 docs/build-plan.md  task list, status and design decisions
 ```
@@ -118,7 +118,8 @@ just check        # fmt, clippy -D warnings, layer and spawn rules, all tests
 cargo xtask all   # just the repository rules
 just deny         # licences, advisories, bans
 just up           # local Neo4j, SeaweedFS (S3), Prometheus, Grafana
-just test-live    # adapter tests against the local stack
+just test-live    # adapter and loader tests against the local stack
+just load         # generate the small benchmark dataset and load it into Neo4j and S3
 
 # run the server against a config (each tenant's API key comes from its api_key_env)
 cargo run -p server -- -c baid.toml check-config
@@ -126,8 +127,9 @@ cargo run -p server -- -c baid.toml
 ```
 
 `just up` starts the local stack (Neo4j, SeaweedFS for S3, Prometheus, Grafana; see
-[deploy/](deploy/README.md)). `just bench-small` comes with the
-benchmark harness.
+[deploy/](deploy/README.md)). `just load` writes a synthetic dataset straight into its
+backends, so run it with BAiD stopped (see [bench/](bench/README.md)). `just bench-small`
+comes with trace replay.
 
 ## Configuration
 
